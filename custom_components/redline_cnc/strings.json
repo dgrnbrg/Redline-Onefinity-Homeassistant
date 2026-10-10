@@ -1,0 +1,32 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Redline CNC (RTS-X)",
+        "description": "Enter the IP address or hostname of your Redline CNC controller.",
+        "data": {
+          "host": "Host / IP Address",
+          "port": "WebSocket Port",
+          "name": "Device Name",
+          "enable_gcode_io": "Infer IO states (Vacuum M8, Air Assist M7, Spindle M3/M4, Aux M62-M65) from active G-code"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Redline CNC WebSocket server."
+    },
+    "abort": {
+      "already_configured": "This Redline CNC controller is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Redline CNC Options",
+        "data": {
+          "enable_gcode_io": "Infer IO states (Vacuum M8, Air Assist M7, Spindle M3/M4, Aux M62-M65) from active G-code"
+        }
+      }
+    }
+  }
+}
