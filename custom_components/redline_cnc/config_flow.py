@@ -87,7 +87,7 @@ class RedlineCncConfigFlow(ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_HOST, default="192.168.60.63"): str,
+                vol.Required(CONF_HOST): str,
                 vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
                 vol.Optional(CONF_NAME, default=DEFAULT_NAME): str,
                 vol.Optional(

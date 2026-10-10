@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
@@ -69,10 +70,8 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
         value_fn=lambda d: d.progress_percent,
         attributes_fn=lambda d: {
             "raw_progress": d.progress,
-            "current_line": d.current_line,
-            "current_line_number": d.current_line_number,
+            "current_line": d.current_line_number,
             "total_lines": d.total_lines,
-            "elapsed_eta": d.elapsed_eta,
         },
     ),
     RedlineCncSensorEntityDescription(
@@ -92,17 +91,22 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
         key="current_line",
         name="Current Line",
         icon="mdi:format-list-numbered",
-        value_fn=lambda d: d.current_line or "0 / 0",
-        attributes_fn=lambda d: {
-            "current_line_number": d.current_line_number,
-            "total_lines": d.total_lines,
-        },
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.current_line_number,
     ),
     RedlineCncSensorEntityDescription(
-        key="elapsed_eta",
-        name="Elapsed / ETA",
+        key="total_lines",
+        name="Total Lines",
+        icon="mdi:format-list-bulleted-type",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda d: d.total_lines,
+    ),
+    RedlineCncSensorEntityDescription(
+        key="eta",
+        name="ETA",
         icon="mdi:timer-outline",
-        value_fn=lambda d: d.elapsed_eta,
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda d: d.eta,
     ),
     RedlineCncSensorEntityDescription(
         key="spindle_rpm",
@@ -160,7 +164,7 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
             else "mdi:rotate-orbit",
             state_class=SensorStateClass.MEASUREMENT,
             suggested_display_precision=3,
-            entity_registry_enabled_default=(axis != "A"),
+            entity_registry_enabled_default=False,
             value_fn=lambda d, idx=i: d.work_pos[idx],
             unit_fn=lambda d: d.unit_symbol,
             attributes_fn=lambda d, idx=i: {
@@ -181,7 +185,7 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
             state_class=SensorStateClass.MEASUREMENT,
             suggested_display_precision=3,
             entity_category=EntityCategory.DIAGNOSTIC,
-            entity_registry_enabled_default=(axis != "A"),
+            entity_registry_enabled_default=False,
             value_fn=lambda d, idx=i: d.mach_pos[idx],
             unit_fn=lambda d: d.unit_symbol,
         )

@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -30,6 +32,8 @@ from .gcode_parser import GcodeModalState, GcodeProgramTimeline
 
 _LOGGER = logging.getLogger(__name__)
 
+_FILE_INFO_LINES_RE = re.compile(r"(\d+)\s+lines", re.IGNORECASE)
+
 
 @dataclass
 class RedlineCncData:
@@ -48,6 +52,7 @@ class RedlineCncData:
     current_line_number: int = 0
     total_lines: int = 0
     elapsed_eta: str = "00:00:00"
+    eta: datetime | None = None
     units: str = "metric"
     unit_symbol: str = "mm"
     mach_pos: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
@@ -149,6 +154,9 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         self._gcode_timelines: dict[str, GcodeProgramTimeline] = {}
         self._download_buffers: dict[str, bytearray] = {}
         self._requested_downloads: set[str] = set()
+
+        # Track which loaded file has its ETA locked in so ETA only changes when a job is loaded
+        self._eta_locked_for_file: str = ""
 
     @property
     def ws_url(self) -> str:
@@ -382,6 +390,8 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
                     fname,
                     timeline.total_lines,
                 )
+                if self.data.total_lines == 0 and basename == self.data.file_name:
+                    self.data.total_lines = timeline.total_lines
                 if self._update_modal_io_state():
                     self.async_set_updated_data(self.data)
             return
@@ -453,6 +463,27 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             )
         )
 
+    def _maybe_lock_eta_for_loaded_job(self) -> bool:
+        """Compute and lock the ETA timestamp from the CNC's elapsed_eta field without constant ticking."""
+        fname = self.data.file_name
+        duration_s = _parse_eta_seconds(self.data.elapsed_eta)
+
+        if not fname or duration_s <= 0:
+            if self.data.eta is not None:
+                self.data.eta = None
+                self._eta_locked_for_file = ""
+                return True
+            return False
+
+        if self._eta_locked_for_file == fname and self.data.eta is not None:
+            return False
+
+        self.data.eta = datetime.now(timezone.utc).replace(
+            microsecond=0
+        ) + timedelta(seconds=duration_s)
+        self._eta_locked_for_file = fname
+        return True
+
     def _apply_status_payload(self, payload: dict[str, Any]) -> bool:
         """Apply a status JSON message to `self.data`, returning True if state changed."""
         prev_snapshot = self._state_comparison_tuple()
@@ -461,10 +492,18 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             new_file = payload["file_name"]
             if new_file != self.data.file_name:
                 self.data.file_name = new_file
+                self.data.eta = None
+                self._eta_locked_for_file = ""
                 self._maybe_request_active_gcode_download()
 
         if isinstance(payload.get("file_info"), str):
             self.data.file_info = payload["file_info"]
+            m_lines = _FILE_INFO_LINES_RE.search(self.data.file_info)
+            if m_lines:
+                try:
+                    self.data.total_lines = int(m_lines.group(1))
+                except ValueError:
+                    pass
 
         if isinstance(payload.get("progress"), (int, float)):
             prog = float(payload["progress"])
@@ -481,6 +520,8 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
 
         if isinstance(payload.get("elapsed_eta"), str):
             self.data.elapsed_eta = payload["elapsed_eta"]
+
+        self._maybe_lock_eta_for_loaded_job()
 
         if isinstance(payload.get("mach_state"), str):
             mach_state = payload["mach_state"]
@@ -527,7 +568,7 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             for i in range(4)
         )  # type: ignore[assignment]
 
-        # Check if camera stream has gone stale (>10s without frames)
+        # Check if camera stream has gone stale (>15s without frames)
         if (
             self.data.camera_available
             and self._last_frame_monotonic > 0
@@ -607,7 +648,11 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         )
 
         timeline = self._gcode_timelines.get(self.data.file_name)
-        if timeline is not None and self.data.current_line_number > 0:
+        if (
+            self.enable_gcode_io
+            and timeline is not None
+            and self.data.current_line_number > 0
+        ):
             modal: GcodeModalState = timeline.state_at_line(
                 self.data.current_line_number
             )
@@ -660,8 +705,9 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.file_name,
             self.data.file_info,
             self.data.progress_percent,
-            self.data.current_line,
-            self.data.elapsed_eta,
+            self.data.current_line_number,
+            self.data.total_lines,
+            self.data.eta,
             self.data.units,
             self.data.mach_pos,
             self.data.work_pos,
@@ -688,3 +734,19 @@ def _parse_current_line(current_line_str: str) -> tuple[int, int]:
         return int(current_line_str.strip()), 0
     except ValueError:
         return 0, 0
+
+
+def _parse_eta_seconds(elapsed_eta_str: str) -> int:
+    """Parse an 'HH:MM:SS' or 'elapsed / HH:MM:SS' string into total seconds."""
+    if not elapsed_eta_str:
+        return 0
+    target = elapsed_eta_str.split("/")[-1].strip()
+    parts = target.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(float(parts[1]))
+    except ValueError:
+        return 0
+    return 0

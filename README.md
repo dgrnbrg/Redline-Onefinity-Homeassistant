@@ -12,12 +12,13 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete reverse-engineered WebSocket pro
 
 ### Sensors (`sensor`)
 * **Machine State** (`sensor.redline_cnc_machine_state`): `"Ready"`, `"Running"`, `"E-Stop"`, `"Disconnected"`, etc.
-* **Job Progress** (`sensor.redline_cnc_job_progress`): `0.0%` – `100.0%` (with attributes `current_line`, `current_line_number`, `total_lines`, `elapsed_eta`).
+* **Job Progress** (`sensor.redline_cnc_job_progress`): `0.0%` – `100.0%` (with attributes `current_line`, `total_lines`).
 * **Current File** (`sensor.redline_cnc_current_file`): Currently loaded `.ngc` file name (with `file_info`, `full_path`, `total_files_on_controller`).
-* **Current Line** (`sensor.redline_cnc_current_line`): Formatted `"<current> / <total>"` line progress.
-* **Elapsed / ETA** (`sensor.redline_cnc_elapsed_eta`): Job timer (`"HH:MM:SS"`).
-* **Work Position X / Y / Z / A** (`sensor.redline_cnc_work_position_x`, etc.): Work coordinates (`WPos = MPos - WCS`), automatically scaled to `"in"` or `"mm"`.
-* **Machine Position X / Y / Z / A** (`sensor.redline_cnc_machine_position_x`, etc.): Raw machine coordinates (`MPos`).
+* **Current Line** (`sensor.redline_cnc_current_line`): Current G-code line number (`int`).
+* **Total Lines** (`sensor.redline_cnc_total_lines`): Total G-code lines in the loaded file (`int`).
+* **ETA** (`sensor.redline_cnc_eta`): Timestamp (`SensorDeviceClass.TIMESTAMP`) computed from the CNC controller's `elapsed_eta` duration when a job is loaded, rendered as a future countdown timer in Home Assistant without constant ticking.
+* **Work Position X / Y / Z / A** (`sensor.redline_cnc_work_position_x`, etc.): Work coordinates (`WPos = MPos - WCS`), scaled to `"in"` or `"mm"` *(disabled by default)*.
+* **Machine Position X / Y / Z / A** (`sensor.redline_cnc_machine_position_x`, etc.): Raw machine coordinates (`MPos`) *(disabled by default)*.
 * **Target Spindle Speed** (`sensor.redline_cnc_target_spindle_speed`): Commanded spindle speed in `rpm`.
 * **Target Feed Rate** (`sensor.redline_cnc_target_feed_rate`): Commanded feed rate (`in/min` or `mm/min`).
 * **Active Tool** (`sensor.redline_cnc_active_tool`): Active tool number and description from the controller's tool table.
