@@ -56,20 +56,21 @@ IDLE_MACHINE_STATES: set[str] = {
     "paused",
     "pause",
     "unknown",
+    "probing",
+    "probe",
+    "homing",
+    "home",
+    "jogging",
+    "jog",
+    "moving",
+    "mdi",
+    "tool change",
 }
 
 RUNNING_MACHINE_STATES: set[str] = {
     "running",
     "run",
     "cutting",
-    "moving",
-    "jogging",
-    "jog",
-    "homing",
-    "home",
-    "probing",
-    "probe",
-    "spindle",
 }
 
 AXIS_NAMES: tuple[str, ...] = ("X", "Y", "Z", "A")

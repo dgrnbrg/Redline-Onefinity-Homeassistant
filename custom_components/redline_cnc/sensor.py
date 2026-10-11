@@ -107,6 +107,9 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
         icon="mdi:timer-outline",
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda d: d.eta,
+        attributes_fn=lambda d: {
+            "raw_elapsed_eta": d.elapsed_eta,
+        },
     ),
     RedlineCncSensorEntityDescription(
         key="spindle_rpm",

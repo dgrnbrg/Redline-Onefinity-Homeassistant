@@ -33,6 +33,11 @@ from .gcode_parser import GcodeModalState, GcodeProgramTimeline
 _LOGGER = logging.getLogger(__name__)
 
 _FILE_INFO_LINES_RE = re.compile(r"(\d+)\s+lines", re.IGNORECASE)
+_TIME_TOKEN_RE = re.compile(r"(\d+):(\d{2})(?::(\d{2}(?:\.\d+)?))?")
+_HMS_UNIT_RE = re.compile(
+    r"(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+(?:\.\d+)?)\s*s)?",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -51,6 +56,7 @@ class RedlineCncData:
     current_line: str = ""
     current_line_number: int = 0
     total_lines: int = 0
+    reported_line_total: int = 0
     elapsed_eta: str = "00:00:00"
     eta: datetime | None = None
     units: str = "metric"
@@ -155,8 +161,14 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         self._download_buffers: dict[str, bytearray] = {}
         self._requested_downloads: set[str] = set()
 
-        # Track which loaded file has its ETA locked in so ETA only changes when a job is loaded
-        self._eta_locked_for_file: str = ""
+        # Track which loaded file has its ETA locked in so ETA does not tick every second
+        self._eta_locked_for_file: str | None = None
+        self._last_eta_duration_s: int | None = None
+
+        # Track idle line number vs active G-code line progression so HMI probing
+        # never triggers G-code modal IOs from a pre-loaded file
+        self._idle_line_number: int = 0
+        self._job_line_advanced: bool = False
 
     @property
     def ws_url(self) -> str:
@@ -466,23 +478,38 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
     def _maybe_lock_eta_for_loaded_job(self) -> bool:
         """Compute and lock the ETA timestamp from the CNC's elapsed_eta field without constant ticking."""
         fname = self.data.file_name
-        duration_s = _parse_eta_seconds(self.data.elapsed_eta)
+        duration_s = _parse_eta_seconds(self.data.elapsed_eta, self.data.progress)
+        now_utc = datetime.now(timezone.utc).replace(microsecond=0)
 
-        if not fname or duration_s <= 0:
-            if self.data.eta is not None:
-                self.data.eta = None
-                self._eta_locked_for_file = ""
-                return True
+        # When connecting or when a new file is loaded, set the initial ETA timestamp
+        if self._eta_locked_for_file != fname or self.data.eta is None:
+            self.data.eta = now_utc + timedelta(seconds=duration_s)
+            self._eta_locked_for_file = fname
+            self._last_eta_duration_s = duration_s
+            return True
+
+        # If the controller's reported duration hasn't changed, keep the locked ETA
+        if duration_s == self._last_eta_duration_s:
             return False
 
-        if self._eta_locked_for_file == fname and self.data.eta is not None:
-            return False
+        # If duration reset to 0 (e.g., job finished or stopped), snap ETA to now once
+        if duration_s <= 0:
+            self.data.eta = now_utc
+            self._last_eta_duration_s = 0
+            return True
 
-        self.data.eta = datetime.now(timezone.utc).replace(
-            microsecond=0
-        ) + timedelta(seconds=duration_s)
-        self._eta_locked_for_file = fname
-        return True
+        # Duration is positive and changed: update if transitioning from 0s or if ETA shifted by >30s
+        target_eta = now_utc + timedelta(seconds=duration_s)
+        prev_duration = self._last_eta_duration_s
+        self._last_eta_duration_s = duration_s
+        if (
+            prev_duration is None
+            or prev_duration <= 0
+            or abs((target_eta - self.data.eta).total_seconds()) > 30
+        ):
+            self.data.eta = target_eta
+            return True
+        return False
 
     def _apply_status_payload(self, payload: dict[str, Any]) -> bool:
         """Apply a status JSON message to `self.data`, returning True if state changed."""
@@ -493,7 +520,9 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             if new_file != self.data.file_name:
                 self.data.file_name = new_file
                 self.data.eta = None
-                self._eta_locked_for_file = ""
+                self._eta_locked_for_file = None
+                self._last_eta_duration_s = None
+                self._job_line_advanced = False
                 self._maybe_request_active_gcode_download()
 
         if isinstance(payload.get("file_info"), str):
@@ -515,6 +544,7 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.current_line = cur_line
             cur_num, tot_num = _parse_current_line(cur_line)
             self.data.current_line_number = cur_num
+            self.data.reported_line_total = tot_num
             if tot_num > 0:
                 self.data.total_lines = tot_num
 
@@ -528,12 +558,44 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.mach_state = mach_state
             state_lower = mach_state.strip().lower()
             self.data.estop_active = "e-stop" in state_lower or "estop" in state_lower
-            if state_lower in RUNNING_MACHINE_STATES:
-                self.data.is_running = True
-            elif state_lower in IDLE_MACHINE_STATES or self.data.estop_active:
+            is_non_job_state = any(
+                kw in state_lower
+                for kw in (
+                    "prob",
+                    "hom",
+                    "jog",
+                    "mov",
+                    "mdi",
+                    "hold",
+                    "paus",
+                    "stop",
+                    "ready",
+                    "idle",
+                    "alarm",
+                    "err",
+                    "off",
+                    "disconnect",
+                )
+            )
+            if (
+                self.data.estop_active
+                or is_non_job_state
+                or state_lower in IDLE_MACHINE_STATES
+            ):
                 self.data.is_running = False
-            else:
+            elif state_lower in RUNNING_MACHINE_STATES:
                 self.data.is_running = True
+            else:
+                self.data.is_running = False
+
+        if not self.data.is_running:
+            self._idle_line_number = self.data.current_line_number
+            self._job_line_advanced = False
+        elif (
+            self.data.current_line_number > 0
+            and self.data.current_line_number != self._idle_line_number
+        ):
+            self._job_line_advanced = True
 
         if isinstance(payload.get("units"), str):
             units = payload["units"].lower()
@@ -634,6 +696,28 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.io_source = "websocket"
         return found_direct
 
+    def _is_gcode_job_active(self, timeline: GcodeProgramTimeline) -> bool:
+        """Return True only when the loaded G-code file is actively executing (not HMI probing)."""
+        if not self.data.is_running or not self.data.file_name:
+            return False
+        if self.data.current_line_number <= 0:
+            return False
+        # If the controller reports a total line count that doesn't match the loaded file,
+        # it is executing an internal macro/subroutine (such as an HMI XYZ probe routine).
+        if (
+            self.data.reported_line_total > 0
+            and timeline.total_lines > 0
+            and abs(self.data.reported_line_total - timeline.total_lines) > 5
+        ):
+            return False
+        # Require evidence that the G-code program itself is progressing rather than sitting
+        # at a stale idle line number while HMI probing moves the axes.
+        return (
+            self._job_line_advanced
+            or self.data.progress > 0.0
+            or _parse_eta_seconds(self.data.elapsed_eta, self.data.progress) > 0
+        )
+
     def _update_modal_io_state(self) -> bool:
         """Update IO and spindle/feed state from the active G-code timeline at current_line."""
         prev = (
@@ -661,7 +745,7 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.active_tool = modal.active_tool
             self.data.spindle_cw = modal.spindle_cw
 
-            if self.data.is_running:
+            if self._is_gcode_job_active(timeline):
                 self.data.spindle_on = modal.spindle_on
                 self.data.vacuum_on = modal.vacuum_on
                 self.data.air_assist_on = modal.air_assist_on
@@ -736,17 +820,47 @@ def _parse_current_line(current_line_str: str) -> tuple[int, int]:
         return 0, 0
 
 
-def _parse_eta_seconds(elapsed_eta_str: str) -> int:
-    """Parse an 'HH:MM:SS' or 'elapsed / HH:MM:SS' string into total seconds."""
+def _parse_eta_seconds(elapsed_eta_str: str, progress: float = 0.0) -> int:
+    """Parse an 'HH:MM:SS', 'elapsed / HH:MM:SS', or 'Xh Ym Zs' string into remaining seconds."""
     if not elapsed_eta_str:
         return 0
-    target = elapsed_eta_str.split("/")[-1].strip()
-    parts = target.split(":")
-    try:
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + int(float(parts[1]))
-    except ValueError:
+
+    tokens: list[int] = []
+    for p1, p2, p3 in _TIME_TOKEN_RE.findall(elapsed_eta_str):
+        try:
+            if p3 != "":
+                sec = int(p1) * 3600 + int(p2) * 60 + int(float(p3))
+            else:
+                sec = int(p1) * 60 + int(p2)
+            tokens.append(sec)
+        except ValueError:
+            continue
+
+    if len(tokens) >= 2:
+        elapsed_s = tokens[0]
+        eta_s = tokens[-1]
+        if eta_s > 0:
+            return eta_s
+        if elapsed_s > 0 and 0.0 < progress < 1.0:
+            return int(round(elapsed_s * (1.0 - progress) / progress))
         return 0
+
+    if len(tokens) == 1:
+        single_s = tokens[0]
+        # If string had a '/' separator where the ETA half was '--:--:--' and only elapsed matched
+        if "/" in elapsed_eta_str:
+            right_half = elapsed_eta_str.split("/", 1)[1]
+            if not _TIME_TOKEN_RE.search(right_half):
+                if single_s > 0 and 0.0 < progress < 1.0:
+                    return int(round(single_s * (1.0 - progress) / progress))
+                return 0
+        return single_s
+
+    m_hms = _HMS_UNIT_RE.search(elapsed_eta_str)
+    if m_hms and any(m_hms.groups()):
+        h = int(m_hms.group(1) or 0)
+        m = int(m_hms.group(2) or 0)
+        s = int(float(m_hms.group(3) or 0))
+        return h * 3600 + m * 60 + s
+
     return 0
