@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import RedlineCncConfigEntry
-from .const import AXIS_NAMES
+from .const import AXIS_NAMES, MACHINE_STATE_OPTIONS
 from .coordinator import RedlineCncCoordinator, RedlineCncData
 from .entity import RedlineCncEntity
 
@@ -29,6 +29,46 @@ class RedlineCncSensorEntityDescription(SensorEntityDescription):
     value_fn: Callable[[RedlineCncData], Any] = lambda _: None
     unit_fn: Callable[[RedlineCncData], str | None] | None = None
     attributes_fn: Callable[[RedlineCncData], dict[str, Any]] | None = None
+
+
+def _format_mach_state(data: RedlineCncData) -> str:
+    """Format machine state matching MACHINE_STATE_OPTIONS."""
+    if not data.connected:
+        return "Disconnected"
+    raw = (data.mach_state or "").strip()
+    if not raw:
+        return "Unknown"
+    lower = raw.lower()
+    for opt in MACHINE_STATE_OPTIONS:
+        if opt.lower() == lower:
+            return opt
+    if "estop" in lower or "e-stop" in lower:
+        return "E-Stop"
+    if "prob" in lower:
+        return "Probing"
+    if "hom" in lower:
+        return "Homing"
+    if "jog" in lower:
+        return "Jogging"
+    if "mov" in lower:
+        return "Moving"
+    if "run" in lower or "cut" in lower:
+        return "Running"
+    if "read" in lower or "idle" in lower:
+        return "Ready"
+    if "paus" in lower or "hold" in lower:
+        return "Paused"
+    return "Unknown"
+
+
+def _format_duration(seconds: int) -> str:
+    """Format seconds into HH:MM:SS."""
+    if seconds <= 0:
+        return "00:00:00"
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def _active_tool_label(data: RedlineCncData) -> str | None:
@@ -53,11 +93,15 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
         key="mach_state",
         name="Machine State",
         icon="mdi:state-machine",
-        value_fn=lambda d: d.mach_state,
+        device_class=SensorDeviceClass.ENUM,
+        options=list(MACHINE_STATE_OPTIONS),
+        value_fn=_format_mach_state,
         attributes_fn=lambda d: {
+            "machine_states": list(MACHINE_STATE_OPTIONS),
             "is_running": d.is_running,
             "estop_active": d.estop_active,
             "units": d.units,
+            "raw_state": d.mach_state,
         },
     ),
     RedlineCncSensorEntityDescription(
@@ -108,7 +152,11 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=lambda d: d.eta,
         attributes_fn=lambda d: {
+            "remaining_time": _format_duration(d.remaining_seconds),
+            "elapsed_time": _format_duration(d.elapsed_seconds),
             "raw_elapsed_eta": d.elapsed_eta,
+            "job_start_time": d.job_start_utc.isoformat() if d.job_start_utc else None,
+            "is_running": d.is_running,
         },
     ),
     RedlineCncSensorEntityDescription(

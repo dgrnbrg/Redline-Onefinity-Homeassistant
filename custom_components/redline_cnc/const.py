@@ -73,4 +73,24 @@ RUNNING_MACHINE_STATES: set[str] = {
     "cutting",
 }
 
+MACHINE_STATE_OPTIONS: tuple[str, ...] = (
+    "Ready",
+    "Running",
+    "Cutting",
+    "Paused",
+    "Hold",
+    "Probing",
+    "Homing",
+    "Jogging",
+    "Moving",
+    "MDI",
+    "Tool Change",
+    "Stopped",
+    "E-Stop",
+    "Alarm",
+    "Error",
+    "Disconnected",
+    "Unknown",
+)
+
 AXIS_NAMES: tuple[str, ...] = ("X", "Y", "Z", "A")

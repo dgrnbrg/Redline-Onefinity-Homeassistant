@@ -59,6 +59,9 @@ class RedlineCncData:
     reported_line_total: int = 0
     elapsed_eta: str = "00:00:00"
     eta: datetime | None = None
+    remaining_seconds: int = 0
+    elapsed_seconds: int = 0
+    job_start_utc: datetime | None = None
     units: str = "metric"
     unit_symbol: str = "mm"
     mach_pos: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
@@ -164,6 +167,9 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         # Track which loaded file has its ETA locked in so ETA does not tick every second
         self._eta_locked_for_file: str | None = None
         self._last_eta_duration_s: int | None = None
+        self._job_start_mono: float | None = None
+        self._job_start_utc: datetime | None = None
+        self._last_job_running: bool = False
 
         # Track idle line number vs active G-code line progression so HMI probing
         # never triggers G-code modal IOs from a pre-loaded file
@@ -475,41 +481,57 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             )
         )
 
-    def _maybe_lock_eta_for_loaded_job(self) -> bool:
-        """Compute and lock the ETA timestamp from the CNC's elapsed_eta field without constant ticking."""
-        fname = self.data.file_name
-        duration_s = _parse_eta_seconds(self.data.elapsed_eta, self.data.progress)
+    def _update_eta(self) -> bool:
+        """Compute and update the ETA timestamp and remaining duration from controller telemetry."""
         now_utc = datetime.now(timezone.utc).replace(microsecond=0)
+        now_mono = time.monotonic()
+        prev_eta = self.data.eta
 
-        # When connecting or when a new file is loaded, set the initial ETA timestamp
-        if self._eta_locked_for_file != fname or self.data.eta is None:
-            self.data.eta = now_utc + timedelta(seconds=duration_s)
-            self._eta_locked_for_file = fname
-            self._last_eta_duration_s = duration_s
-            return True
+        if not self.data.is_running or not self.data.file_name:
+            if not self.data.is_running and self.data.progress < 0.999:
+                self.data.remaining_seconds = 0
+                self.data.elapsed_seconds = 0
+            return self.data.eta != prev_eta
 
-        # If the controller's reported duration hasn't changed, keep the locked ETA
-        if duration_s == self._last_eta_duration_s:
-            return False
+        # Compute real elapsed time since job started
+        if self._job_start_mono is not None:
+            elapsed_s = max(1.0, now_mono - self._job_start_mono)
+        else:
+            elapsed_s = 1.0
+        self.data.elapsed_seconds = int(elapsed_s)
 
-        # If duration reset to 0 (e.g., job finished or stopped), snap ETA to now once
-        if duration_s <= 0:
-            self.data.eta = now_utc
-            self._last_eta_duration_s = 0
-            return True
+        # 1. Check if controller's elapsed_eta provides an explicit ETA duration
+        parsed_s = _parse_eta_seconds(self.data.elapsed_eta, self.data.progress)
+        remaining_s: float = 0.0
 
-        # Duration is positive and changed: update if transitioning from 0s or if ETA shifted by >30s
-        target_eta = now_utc + timedelta(seconds=duration_s)
-        prev_duration = self._last_eta_duration_s
-        self._last_eta_duration_s = duration_s
-        if (
-            prev_duration is None
-            or prev_duration <= 0
-            or abs((target_eta - self.data.eta).total_seconds()) > 30
-        ):
-            self.data.eta = target_eta
-            return True
-        return False
+        if parsed_s > 0:
+            remaining_s = float(parsed_s)
+            self.data.remaining_seconds = int(remaining_s)
+        else:
+            # 2. Derive remaining time from controller progress
+            prog = self.data.progress
+            if prog <= 0.0 and self.data.total_lines > 0 and self.data.current_line_number > 0:
+                prog = self.data.current_line_number / self.data.total_lines
+
+            if prog > 0.002 and elapsed_s >= 2.0:
+                total_est_s = elapsed_s / prog
+                remaining_s = max(0.0, total_est_s - elapsed_s)
+                self.data.remaining_seconds = int(remaining_s)
+            elif self.data.remaining_seconds > 0:
+                remaining_s = float(self.data.remaining_seconds)
+
+        if remaining_s > 0.0:
+            target_eta = now_utc + timedelta(seconds=int(round(remaining_s)))
+            # Initialize or update with a 30s hysteresis window to avoid per-second timestamp jitter
+            if (
+                self.data.eta is None
+                or self.data.eta <= now_utc
+                or abs((target_eta - self.data.eta).total_seconds()) > 30
+            ):
+                self.data.eta = target_eta
+                return True
+
+        return self.data.eta != prev_eta
 
     def _apply_status_payload(self, payload: dict[str, Any]) -> bool:
         """Apply a status JSON message to `self.data`, returning True if state changed."""
@@ -522,6 +544,11 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
                 self.data.eta = None
                 self._eta_locked_for_file = None
                 self._last_eta_duration_s = None
+                self._job_start_mono = None
+                self._job_start_utc = None
+                self.data.job_start_utc = None
+                self.data.remaining_seconds = 0
+                self.data.elapsed_seconds = 0
                 self._job_line_advanced = False
                 self._maybe_request_active_gcode_download()
 
@@ -550,8 +577,6 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
 
         if isinstance(payload.get("elapsed_eta"), str):
             self.data.elapsed_eta = payload["elapsed_eta"]
-
-        self._maybe_lock_eta_for_loaded_job()
 
         if isinstance(payload.get("mach_state"), str):
             mach_state = payload["mach_state"]
@@ -588,6 +613,27 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             else:
                 self.data.is_running = False
 
+        if self.data.is_running:
+            if not self._last_job_running or self._job_start_mono is None:
+                self._job_start_mono = time.monotonic()
+                self._job_start_utc = datetime.now(timezone.utc).replace(microsecond=0)
+                self.data.job_start_utc = self._job_start_utc
+                self.data.eta = None
+            self._last_job_running = True
+        else:
+            if self._last_job_running:
+                if self.data.progress >= 0.999 or (
+                    self.data.total_lines > 0
+                    and self.data.current_line_number >= self.data.total_lines
+                ):
+                    self.data.eta = datetime.now(timezone.utc).replace(microsecond=0)
+                else:
+                    self.data.eta = None
+            self._last_job_running = False
+            self._job_start_mono = None
+            self._job_start_utc = None
+            self.data.job_start_utc = None
+
         if not self.data.is_running:
             self._idle_line_number = self.data.current_line_number
             self._job_line_advanced = False
@@ -596,6 +642,8 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             and self.data.current_line_number != self._idle_line_number
         ):
             self._job_line_advanced = True
+
+        self._update_eta()
 
         if isinstance(payload.get("units"), str):
             units = payload["units"].lower()
@@ -803,6 +851,8 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.air_assist_on,
             tuple(sorted(self.data.aux_outputs.items())),
             self.data.camera_available,
+            self.data.remaining_seconds,
+            self.data.elapsed_seconds,
         )
 
 
