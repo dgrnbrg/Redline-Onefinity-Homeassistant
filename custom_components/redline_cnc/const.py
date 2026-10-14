@@ -65,6 +65,8 @@ IDLE_MACHINE_STATES: set[str] = {
     "moving",
     "mdi",
     "tool change",
+    "toolchange",
+    "tool_change",
 }
 
 RUNNING_MACHINE_STATES: set[str] = {

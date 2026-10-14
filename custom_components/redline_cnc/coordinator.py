@@ -600,6 +600,8 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
                     "err",
                     "off",
                     "disconnect",
+                    "tool",
+                    "change",
                 )
             )
             if (

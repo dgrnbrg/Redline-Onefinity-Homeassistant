@@ -24,6 +24,29 @@ class GcodeModalState:
     aux_outputs: dict[int, bool] = field(default_factory=dict)  # M62-M65 P<n>
 
 
+def _is_tool_change_shutdown(lines: list[str], next_line_idx: int) -> bool:
+    """Check if an M5/M9 shutdown is followed by an M6 tool change before cutting resumes."""
+    for raw in lines[next_line_idx : min(len(lines), next_line_idx + 35)]:
+        clean = raw.split(";", 1)[0]
+        clean = _PAREN_COMMENT_RE.sub("", clean).strip()
+        if not clean or clean.startswith("%"):
+            continue
+        words = _WORD_RE.findall(clean)
+        for letter, val in words:
+            let = letter.upper()
+            try:
+                num = int(float(val))
+            except ValueError:
+                continue
+            if let == "M" and num == 6:
+                return True
+            if let == "M" and (num in (2, 30) or num in (3, 4)):
+                return False
+            if let == "G" and (num in (1, 2, 3, 33, 38) or 80 <= num <= 89):
+                return False
+    return False
+
+
 class GcodeProgramTimeline:
     """Precomputed timeline of modal G-code IO changes indexed by 1-based line number."""
 
@@ -44,6 +67,9 @@ class GcodeProgramTimeline:
         active_tool: int | None = None
         air_assist_on = False
         vacuum_on = False
+        saved_vacuum_on = False
+        saved_air_assist_on = False
+        in_tool_change = False
         aux_outputs: dict[int, bool] = {}
 
         last_state = self._states[0]
@@ -72,6 +98,12 @@ class GcodeProgramTimeline:
                     except ValueError:
                         pass
 
+            m_codes_on_line = {
+                int(float(val))
+                for letter, val in words
+                if letter == "M" and val != ""
+            }
+
             for letter, val in words:
                 try:
                     num = float(val)
@@ -84,21 +116,66 @@ class GcodeProgramTimeline:
                     feed_rate = num
                 elif letter == "T":
                     active_tool = int(num)
+                elif letter == "G" and int(num) in (1, 2, 3):
+                    if in_tool_change:
+                        in_tool_change = False
+                        if saved_vacuum_on:
+                            vacuum_on = True
+                        if saved_air_assist_on:
+                            air_assist_on = True
+                        saved_vacuum_on = False
+                        saved_air_assist_on = False
                 elif letter == "M":
                     m_code = int(num)
-                    if m_code == 3:
+                    if m_code in (3, 4):
                         spindle_on = True
-                        spindle_cw = True
-                    elif m_code == 4:
-                        spindle_on = True
-                        spindle_cw = False
+                        spindle_cw = (m_code == 3)
+                        if in_tool_change:
+                            in_tool_change = False
+                            if saved_vacuum_on:
+                                vacuum_on = True
+                            if saved_air_assist_on:
+                                air_assist_on = True
+                            saved_vacuum_on = False
+                            saved_air_assist_on = False
                     elif m_code == 5:
                         spindle_on = False
+                        is_tc = (6 in m_codes_on_line) or _is_tool_change_shutdown(lines, idx)
+                        if is_tc:
+                            if vacuum_on:
+                                saved_vacuum_on = True
+                            if air_assist_on:
+                                saved_air_assist_on = True
+                            vacuum_on = False
+                            air_assist_on = False
+                            in_tool_change = True
+                    elif m_code == 6:
+                        if vacuum_on:
+                            saved_vacuum_on = True
+                        if air_assist_on:
+                            saved_air_assist_on = True
+                        spindle_on = False
+                        vacuum_on = False
+                        air_assist_on = False
+                        in_tool_change = True
                     elif m_code == 7:
                         air_assist_on = True
+                        saved_air_assist_on = True
                     elif m_code == 8:
                         vacuum_on = True
+                        saved_vacuum_on = True
                     elif m_code == 9:
+                        is_tc = (6 in m_codes_on_line) or _is_tool_change_shutdown(lines, idx)
+                        if is_tc:
+                            if vacuum_on or saved_vacuum_on:
+                                saved_vacuum_on = True
+                            if air_assist_on or saved_air_assist_on:
+                                saved_air_assist_on = True
+                            in_tool_change = True
+                        else:
+                            saved_vacuum_on = False
+                            saved_air_assist_on = False
+                            in_tool_change = False
                         air_assist_on = False
                         vacuum_on = False
                     elif m_code in (62, 64):
@@ -115,6 +192,9 @@ class GcodeProgramTimeline:
                         spindle_on = False
                         air_assist_on = False
                         vacuum_on = False
+                        saved_vacuum_on = False
+                        saved_air_assist_on = False
+                        in_tool_change = False
                         if aux_outputs:
                             aux_outputs = {k: False for k in aux_outputs}
 
