@@ -31,6 +31,7 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete reverse-engineered WebSocket pro
 * **Controller Connected** (`binary_sensor.redline_cnc_controller_connected`): WebSocket connectivity status.
 * **Job Running** (`binary_sensor.redline_cnc_job_running`): `on` whenever the machine is actively running a job.
 * **E-Stop Active** (`binary_sensor.redline_cnc_e_stop_active`): `on` when the controller is in Emergency Stop.
+* **Tool Change Active** (`binary_sensor.redline_cnc_tool_change_active`): `on` when a manual tool change (`M6`) or tool probing routine is active.
 * **IO Spindle** (`binary_sensor.redline_cnc_io_spindle`): `on` when spindle (`M3`/`M4`) is active during a job (or reported directly via WebSocket).
 * **IO Vacuum / Flood Coolant (M8)** (`binary_sensor.redline_cnc_io_vacuum_flood_coolant_m8`): `on` when `M8` (or direct `vacuum`/`flood` IO) is active.
 * **IO Air Assist / Mist Coolant (M7)** (`binary_sensor.redline_cnc_io_air_assist_mist_coolant_m7`): `on` when `M7` (or direct `air_assist`/`mist` IO) is active.

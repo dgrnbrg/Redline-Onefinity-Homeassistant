@@ -57,6 +57,19 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[RedlineCncBinarySensorEntityDescription, ...] 
         attributes_fn=lambda d: {"mach_state": d.mach_state},
     ),
     RedlineCncBinarySensorEntityDescription(
+        key="tool_change_active",
+        name="Tool Change Active",
+        device_class=BinarySensorDeviceClass.RUNNING,
+        icon="mdi:wrench-clock",
+        is_on_fn=lambda d: d.tool_change_active,
+        attributes_fn=lambda d: {
+            "mach_state": d.mach_state,
+            "active_tool": d.active_tool,
+            "current_line": d.current_line_number,
+            "file_name": d.file_name,
+        },
+    ),
+    RedlineCncBinarySensorEntityDescription(
         key="io_spindle",
         name="IO Spindle",
         device_class=BinarySensorDeviceClass.RUNNING,

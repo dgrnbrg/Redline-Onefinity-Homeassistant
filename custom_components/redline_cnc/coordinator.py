@@ -74,6 +74,7 @@ class RedlineCncData:
     active_tool: int | None = None
     vacuum_on: bool = False
     air_assist_on: bool = False
+    tool_change_active: bool = False
     aux_outputs: dict[int, bool] = field(default_factory=lambda: {0: False, 1: False})
     io_source: str = "gcode_modal"
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -312,10 +313,13 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         if not connected:
             self.data.mach_state = "Disconnected"
             self.data.is_running = False
+            self.data.tool_change_active = False
             self.data.spindle_on = False
             self.data.vacuum_on = False
             self.data.air_assist_on = False
             self.data.aux_outputs = {k: False for k in self.data.aux_outputs}
+            self._requested_downloads.clear()
+            self._download_buffers.clear()
         self.async_set_updated_data(self.data)
 
     def _handle_text_message(self, raw_text: str) -> None:
@@ -583,6 +587,11 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.mach_state = mach_state
             state_lower = mach_state.strip().lower()
             self.data.estop_active = "e-stop" in state_lower or "estop" in state_lower
+            is_tc_mach_state = (
+                "tool change" in state_lower
+                or "toolchange" in state_lower
+                or ("tool" in state_lower and "change" in state_lower)
+            )
             is_non_job_state = any(
                 kw in state_lower
                 for kw in (
@@ -614,6 +623,25 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
                 self.data.is_running = True
             else:
                 self.data.is_running = False
+
+            terminal_idle = any(
+                st in state_lower
+                for st in (
+                    "ready",
+                    "idle",
+                    "stop",
+                    "alarm",
+                    "err",
+                    "disconnect",
+                    "off",
+                    "e-stop",
+                    "estop",
+                )
+            )
+            if (terminal_idle and not is_tc_mach_state) or not self.data.connected:
+                self.data.tool_change_active = False
+            elif is_tc_mach_state:
+                self.data.tool_change_active = True
 
         if self.data.is_running:
             if not self._last_job_running or self._job_start_mono is None:
@@ -754,12 +782,16 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             return False
         # If the controller reports a total line count that doesn't match the loaded file,
         # it is executing an internal macro/subroutine (such as an HMI XYZ probe routine).
-        if (
-            self.data.reported_line_total > 0
-            and timeline.total_lines > 0
-            and abs(self.data.reported_line_total - timeline.total_lines) > 5
-        ):
-            return False
+        if self.data.reported_line_total > 0 and timeline.total_lines > 0:
+            if (
+                timeline.total_lines >= 100
+                and self.data.reported_line_total < min(80, int(timeline.total_lines * 0.25))
+            ):
+                return False
+            if abs(self.data.reported_line_total - timeline.total_lines) > max(
+                150, int(timeline.total_lines * 0.35)
+            ):
+                return False
         # Require evidence that the G-code program itself is progressing rather than sitting
         # at a stale idle line number while HMI probing moves the axes.
         return (
@@ -778,16 +810,18 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.active_tool,
             self.data.vacuum_on,
             self.data.air_assist_on,
+            self.data.tool_change_active,
             dict(self.data.aux_outputs),
         )
 
+        modal: GcodeModalState | None = None
         timeline = self._gcode_timelines.get(self.data.file_name)
         if (
             self.enable_gcode_io
             and timeline is not None
             and self.data.current_line_number > 0
         ):
-            modal: GcodeModalState = timeline.state_at_line(
+            modal = timeline.state_at_line(
                 self.data.current_line_number
             )
             self.data.spindle_rpm = modal.spindle_rpm
@@ -816,6 +850,36 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
                 for pin in (0, 1):
                     self.data.aux_outputs[pin] = False
 
+        state_lower = self.data.mach_state.strip().lower()
+        is_tc_mach_state = (
+            "tool change" in state_lower
+            or "toolchange" in state_lower
+            or ("tool" in state_lower and "change" in state_lower)
+        )
+        terminal_idle = any(
+            st in state_lower
+            for st in (
+                "ready",
+                "idle",
+                "stop",
+                "alarm",
+                "err",
+                "disconnect",
+                "off",
+                "e-stop",
+                "estop",
+            )
+        )
+
+        if (terminal_idle and not is_tc_mach_state) or not self.data.connected:
+            self.data.tool_change_active = False
+        elif is_tc_mach_state:
+            self.data.tool_change_active = True
+        elif modal is not None and modal.in_tool_change:
+            self.data.tool_change_active = True
+        elif self.data.is_running:
+            self.data.tool_change_active = False
+
         curr = (
             self.data.spindle_on,
             self.data.spindle_cw,
@@ -824,6 +888,7 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.active_tool,
             self.data.vacuum_on,
             self.data.air_assist_on,
+            self.data.tool_change_active,
             dict(self.data.aux_outputs),
         )
         return curr != prev
@@ -836,6 +901,7 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.mach_state,
             self.data.is_running,
             self.data.estop_active,
+            self.data.tool_change_active,
             self.data.file_name,
             self.data.file_info,
             self.data.progress_percent,

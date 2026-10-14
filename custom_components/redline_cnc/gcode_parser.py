@@ -21,12 +21,13 @@ class GcodeModalState:
     active_tool: int | None = None
     air_assist_on: bool = False  # M7 (Mist coolant / Air assist)
     vacuum_on: bool = False  # M8 (Flood coolant / Vacuum / Dust collection)
+    in_tool_change: bool = False
     aux_outputs: dict[int, bool] = field(default_factory=dict)  # M62-M65 P<n>
 
 
 def _is_tool_change_shutdown(lines: list[str], next_line_idx: int) -> bool:
     """Check if an M5/M9 shutdown is followed by an M6 tool change before cutting resumes."""
-    for raw in lines[next_line_idx : min(len(lines), next_line_idx + 35)]:
+    for raw in lines[next_line_idx : min(len(lines), next_line_idx + 100)]:
         clean = raw.split(";", 1)[0]
         clean = _PAREN_COMMENT_RE.sub("", clean).strip()
         if not clean or clean.startswith("%"):
@@ -42,7 +43,7 @@ def _is_tool_change_shutdown(lines: list[str], next_line_idx: int) -> bool:
                 return True
             if let == "M" and (num in (2, 30) or num in (3, 4)):
                 return False
-            if let == "G" and (num in (1, 2, 3, 33, 38) or 80 <= num <= 89):
+            if let == "G" and (num in (1, 2, 3, 33) or 80 <= num <= 89):
                 return False
     return False
 
@@ -161,9 +162,11 @@ class GcodeProgramTimeline:
                     elif m_code == 7:
                         air_assist_on = True
                         saved_air_assist_on = True
+                        in_tool_change = False
                     elif m_code == 8:
                         vacuum_on = True
                         saved_vacuum_on = True
+                        in_tool_change = False
                     elif m_code == 9:
                         is_tc = (6 in m_codes_on_line) or _is_tool_change_shutdown(lines, idx)
                         if is_tc:
@@ -206,6 +209,7 @@ class GcodeProgramTimeline:
                 active_tool=active_tool,
                 air_assist_on=air_assist_on,
                 vacuum_on=vacuum_on,
+                in_tool_change=in_tool_change,
                 aux_outputs=aux_outputs,
             )
             if new_state != last_state:
