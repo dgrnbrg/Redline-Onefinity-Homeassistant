@@ -61,11 +61,11 @@ app.add_middleware(
 )
 
 app.mount("/", StaticFiles(directory=resource_path("webapp"), html=True), name="webapp")
+
 """
 
-FACTORY_WEB_API_SHA256 = hashlib.sha256(
-    FACTORY_WEB_API_PY.encode("utf-8")
-).hexdigest()
+FACTORY_WEB_API_SHA256 = "c5a67c768b8e582a84e995f371eaebb813c3fca38cdd8e8bd717a35420978fc0"
+assert hashlib.sha256(FACTORY_WEB_API_PY.encode("utf-8")).hexdigest() == FACTORY_WEB_API_SHA256
 VENDOR_ORIGINAL_WEB_API = FACTORY_WEB_API_PY
 VENDOR_ORIGINAL_SHA256 = FACTORY_WEB_API_SHA256
 
