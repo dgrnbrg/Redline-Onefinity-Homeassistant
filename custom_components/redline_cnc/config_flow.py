@@ -19,10 +19,20 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_ALLOW_REMOTE_MOTION,
     CONF_ENABLE_GCODE_IO,
+    CONF_SSH_PASSWORD,
+    CONF_SSH_PORT,
+    CONF_SSH_USER,
+    CONF_WEB_PORT,
+    DEFAULT_ALLOW_REMOTE_MOTION,
     DEFAULT_ENABLE_GCODE_IO,
     DEFAULT_NAME,
     DEFAULT_PORT,
+    DEFAULT_SSH_PASSWORD,
+    DEFAULT_SSH_PORT,
+    DEFAULT_SSH_USER,
+    DEFAULT_WEB_PORT,
     DOMAIN,
 )
 from .coordinator import async_probe_controller
@@ -133,6 +143,29 @@ class RedlineCncOptionsFlowHandler(OptionsFlow):
                 DEFAULT_ENABLE_GCODE_IO,
             ),
         )
+        current_allow_remote_motion = self._config_entry.options.get(
+            CONF_ALLOW_REMOTE_MOTION,
+            self._config_entry.data.get(
+                CONF_ALLOW_REMOTE_MOTION,
+                DEFAULT_ALLOW_REMOTE_MOTION,
+            ),
+        )
+        current_web_port = self._config_entry.options.get(
+            CONF_WEB_PORT,
+            self._config_entry.data.get(CONF_WEB_PORT, DEFAULT_WEB_PORT),
+        )
+        current_ssh_user = self._config_entry.options.get(
+            CONF_SSH_USER,
+            self._config_entry.data.get(CONF_SSH_USER, DEFAULT_SSH_USER),
+        )
+        current_ssh_password = self._config_entry.options.get(
+            CONF_SSH_PASSWORD,
+            self._config_entry.data.get(CONF_SSH_PASSWORD, DEFAULT_SSH_PASSWORD),
+        )
+        current_ssh_port = self._config_entry.options.get(
+            CONF_SSH_PORT,
+            self._config_entry.data.get(CONF_SSH_PORT, DEFAULT_SSH_PORT),
+        )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -141,6 +174,26 @@ class RedlineCncOptionsFlowHandler(OptionsFlow):
                         CONF_ENABLE_GCODE_IO,
                         default=current_gcode_io,
                     ): bool,
+                    vol.Optional(
+                        CONF_ALLOW_REMOTE_MOTION,
+                        default=current_allow_remote_motion,
+                    ): bool,
+                    vol.Optional(
+                        CONF_WEB_PORT,
+                        default=current_web_port,
+                    ): int,
+                    vol.Optional(
+                        CONF_SSH_USER,
+                        default=current_ssh_user,
+                    ): str,
+                    vol.Optional(
+                        CONF_SSH_PASSWORD,
+                        default=current_ssh_password,
+                    ): str,
+                    vol.Optional(
+                        CONF_SSH_PORT,
+                        default=current_ssh_port,
+                    ): int,
                 }
             ),
         )

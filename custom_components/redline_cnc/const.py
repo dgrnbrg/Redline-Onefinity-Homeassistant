@@ -7,15 +7,42 @@ from homeassistant.const import Platform
 DOMAIN = "redline_cnc"
 DEFAULT_NAME = "Redline CNC"
 DEFAULT_PORT = 8080
+DEFAULT_WEB_PORT = 8000
+DEFAULT_SSH_PORT = 22
+DEFAULT_SSH_USER = "rtcnc"
+DEFAULT_SSH_PASSWORD = "rtcnc"
 
 CONF_ENABLE_GCODE_IO = "enable_gcode_io"
 DEFAULT_ENABLE_GCODE_IO = True
+CONF_ALLOW_REMOTE_MOTION = "allow_remote_motion"
+DEFAULT_ALLOW_REMOTE_MOTION = False
+CONF_WEB_PORT = "web_port"
+CONF_SSH_PORT = "ssh_port"
+CONF_SSH_USER = "ssh_user"
+CONF_SSH_PASSWORD = "ssh_password"
+
+API_HA_STATUS = "/api/ha/status"
+API_HA_WARMUP_START = "/api/ha/spindle-warmup/start"
+API_HA_WARMUP_CANCEL = "/api/ha/spindle-warmup/cancel"
+API_HA_OUTPUT = "/api/ha/output"
+API_HA_MACRO_RUN = "/api/ha/macro/run"
+API_HA_MACRO_ABORT = "/api/ha/macro/abort"
+
+SERVICE_RUN_MACRO = "run_macro"
+SERVICE_ABORT_MACRO = "abort_macro"
+SERVICE_SET_OUTPUT = "set_output"
+SERVICE_START_SPINDLE_WARMUP = "start_spindle_warmup"
+SERVICE_CANCEL_SPINDLE_WARMUP = "cancel_spindle_warmup"
+SERVICE_INSTALL_PATCH = "install_patch"
+SERVICE_UNINSTALL_PATCH = "uninstall_patch"
+SERVICE_RESTART_RTS1 = "restart_rts1"
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.CAMERA,
     Platform.BUTTON,
+    Platform.SWITCH,
 ]
 
 # WebSocket commands supported by RTS-X Server

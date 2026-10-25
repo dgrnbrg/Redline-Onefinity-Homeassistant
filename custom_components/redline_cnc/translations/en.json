@@ -24,7 +24,12 @@
       "init": {
         "title": "Redline CNC Options",
         "data": {
-          "enable_gcode_io": "Infer IO states (Vacuum M8, Air Assist M7, Spindle M3/M4, Aux M62-M65) from active G-code"
+          "enable_gcode_io": "Infer IO states (Vacuum M8, Air Assist M7, Spindle M3/M4, Aux M62-M65) from active G-code",
+          "allow_remote_motion": "Allow remote spindle warmup and macro execution",
+          "web_port": "Controller Web API Port (FastAPI)",
+          "ssh_user": "SSH Username (for 1-Click Controller Patch)",
+          "ssh_password": "SSH Password (for 1-Click Controller Patch)",
+          "ssh_port": "SSH Port"
         }
       }
     }

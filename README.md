@@ -29,19 +29,38 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete reverse-engineered WebSocket pro
 
 ### Binary Sensors (`binary_sensor`)
 * **Controller Connected** (`binary_sensor.redline_cnc_controller_connected`): WebSocket connectivity status.
+* **Controller Patch Installed** (`binary_sensor.redline_cnc_controller_patch_installed`): `on` when the in-process FastAPI extension (`redline_ha_ext.py`) is active on the controller.
 * **Job Running** (`binary_sensor.redline_cnc_job_running`): `on` whenever the machine is actively running a job.
 * **E-Stop Active** (`binary_sensor.redline_cnc_e_stop_active`): `on` when the controller is in Emergency Stop.
 * **Tool Change Active** (`binary_sensor.redline_cnc_tool_change_active`): `on` when a manual tool change (`M6`) or tool probing routine is active.
+* **Spindle Warmup Active** (`binary_sensor.redline_cnc_spindle_warmup_active`): `on` while the 5-stage Spindle Warmup routine (`8000` -> `12000` -> `16000` -> `20000` -> `24000` RPM) is running, with `stage`, `remaining_seconds`, and `status` attributes.
+* **Macro Running** (`binary_sensor.redline_cnc_macro_running`): `on` while a user macro is actively executing.
 * **IO Spindle** (`binary_sensor.redline_cnc_io_spindle`): `on` when spindle (`M3`/`M4`) is active during a job (or reported directly via WebSocket).
-* **IO Vacuum / Flood Coolant (M8)** (`binary_sensor.redline_cnc_io_vacuum_flood_coolant_m8`): `on` when `M8` (or direct `vacuum`/`flood` IO) is active.
+* **IO Vacuum / Flood Coolant (M8)** (`binary_sensor.redline_cnc_io_vacuum_flood_coolant_m8`): `on` when `M8` (or direct `vacuum`/`flood` IO) is active, including automatic state preservation across `M6` manual tool changes.
 * **IO Air Assist / Mist Coolant (M7)** (`binary_sensor.redline_cnc_io_air_assist_mist_coolant_m7`): `on` when `M7` (or direct `air_assist`/`mist` IO) is active.
-* **IO Aux Output P0 / P1 (M62/M64)** (`binary_sensor.redline_cnc_io_aux_output_p0_m62_m64`): Digital output pin states.
+* **IO Aux Output P0–P3 (OUT0–OUT3)** (`binary_sensor.redline_cnc_io_aux_output_p0_out0`, etc.): Digital output pin states (read directly from hardware GPIO when the controller patch is installed, or inferred from `M62`–`M65` G-code).
+
+### Switches (`switch`)
+* **Output 0 (OUT0) – Output 3 (OUT3)** (`switch.redline_cnc_output_0_out0` .. `switch.redline_cnc_output_3_out3`): Turn the 4 hardware auxiliary outputs (`OUT0`–`OUT3`) on or off directly via `controller.comm.setOutput(pin, state)`, automatically adopting any custom output labels configured in the RTS-X UI.
 
 ### Camera (`camera`)
 * **Camera Feed** (`camera.redline_cnc_camera_feed`): Live `640x480` MJPEG stream and still snapshots decoded on-demand from the controller's WebSocket `image_data` stream.
 
-### Button (`button`)
-* **Refresh Status** (`button.redline_cnc_refresh_status`): Forces an immediate refresh of status, version, tool table, and file tree.
+### Buttons (`button`)
+* **Refresh Status** (`button.redline_cnc_refresh_status`): Forces an immediate refresh of status, version, tool table, file tree, and HA extension state.
+* **Install Controller Patch** (`button.redline_cnc_install_controller_patch`): 1-click SSH installer that backs up `Web_API.py` to `/home/rtcnc/redline_ha_backups/`, initializes a Git repository in `/home/rtcnc/rtcnc/RTS1/_internal`, writes a read-only `Web_API.py.orig` + `.sha256` digest, and deploys `redline_ha_ext.py`.
+* **Uninstall Controller Patch** (`button.redline_cnc_uninstall_controller_patch`): 1-click SSH uninstaller that restores the exact vendor `Web_API.py` via surgical marker strip verified against SHA-256 and Git, removes `redline_ha_ext.py`, and is a safe no-op on already unpatched files.
+* **Restart RTS1** (`button.redline_cnc_restart_rts1`): Safely sends SIGTERM to restart the RTS1 controller process over SSH, with safety guards preventing restart while jobs, macros, or the spindle are active.
+* **Start Spindle Warmup** & **Cancel Spindle Warmup**: Launch or abort the native 5-stage HMI Spindle Warmup sequence (requires enabling "Allow remote spindle warmup and macro execution" in integration options).
+* **Macro 1 – Macro 12** & **Abort Macro**: Trigger any of the 12 configured controller macros when the machine is `Ready`/`IDLE`, or abort an active macro (requires enabling remote motion in options).
+
+### Services (`redline_cnc.*`)
+* `redline_cnc.run_macro`: Execute a configured macro by name (e.g. `"Park"`) or slot number (`1`–`12`).
+* `redline_cnc.abort_macro`: Abort an actively running macro.
+* `redline_cnc.set_output`: Set hardware output pin `0`–`3` (`OUT0`–`OUT3`) to `true` or `false`.
+* `redline_cnc.start_spindle_warmup` / `redline_cnc.cancel_spindle_warmup`: Start or cancel the 5-stage Spindle Warmup routine.
+* `redline_cnc.install_patch` / `redline_cnc.uninstall_patch`: Install or uninstall the controller FastAPI extension over SSH.
+* `redline_cnc.restart_rts1`: Safely restart the RTS1 controller process over SSH (`force`: false by default).
 
 ---
 

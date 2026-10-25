@@ -1,0 +1,71 @@
+run_macro:
+  name: Run Macro
+  description: Execute a configured macro (1-12 or by macro name) on the Redline CNC controller when the machine is Idle/Ready.
+  fields:
+    macro:
+      name: Macro Name or Number
+      description: Macro name (e.g. "Park") or 1-based macro slot number ("1" to "12").
+      example: "1"
+      selector:
+        text:
+    index:
+      name: Macro 0-based Index
+      description: Optional 0-based macro index (0 to 11).
+      selector:
+        number:
+          min: 0
+          max: 11
+          mode: box
+
+abort_macro:
+  name: Abort Macro
+  description: Abort an actively running macro on the Redline CNC controller.
+
+set_output:
+  name: Set Auxiliary Output
+  description: Turn one of the 4 hardware auxiliary outputs (OUT0-OUT3) on or off.
+  fields:
+    pin:
+      name: Output Pin (0-3)
+      description: Hardware output number (0 = OUT0, 1 = OUT1, 2 = OUT2, 3 = OUT3).
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 3
+          mode: box
+    state:
+      name: State
+      description: True to turn output ON, False to turn output OFF.
+      required: true
+      selector:
+        boolean:
+
+start_spindle_warmup:
+  name: Start Spindle Warmup
+  description: Launch the native 5-stage Spindle Warmup routine (8000 -> 12000 -> 16000 -> 20000 -> 24000 RPM) on the Redline CNC controller.
+
+cancel_spindle_warmup:
+  name: Cancel Spindle Warmup
+  description: Cancel an active Spindle Warmup routine and stop the spindle.
+
+install_patch:
+  name: Install Controller Patch
+  description: Connect via SSH, create a Git-tagged and SHA-256 verified vendor backup of Web_API.py, install redline_ha_ext.py, and restart RTS1.
+
+uninstall_patch:
+  name: Uninstall Controller Patch
+  description: Connect via SSH, remove redline_ha_ext.py, restore the exact vendor-original Web_API.py verified by SHA-256 and Git, and restart RTS1.
+
+restart_rts1:
+  name: Restart RTS1
+  description: Safely restart the RTS1 controller process on the Redline CNC controller.
+  fields:
+    force:
+      name: Force Restart
+      description: Force restart even if the machine appears busy.
+      required: false
+      default: false
+      selector:
+        boolean:
+

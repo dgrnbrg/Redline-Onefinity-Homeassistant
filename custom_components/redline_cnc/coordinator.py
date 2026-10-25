@@ -15,20 +15,38 @@ from typing import Any
 import aiohttp
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    API_HA_MACRO_ABORT,
+    API_HA_MACRO_RUN,
+    API_HA_OUTPUT,
+    API_HA_STATUS,
+    API_HA_WARMUP_CANCEL,
+    API_HA_WARMUP_START,
     CMD_DOWNLOAD_FILE,
     CMD_REFRESH_FILE_LIST,
     CMD_REFRESH_STATUS,
     CMD_REQUEST_TOOL_TABLE,
     CMD_REQUEST_VERSION,
+    CONF_ALLOW_REMOTE_MOTION,
+    DEFAULT_ALLOW_REMOTE_MOTION,
+    DEFAULT_SSH_PASSWORD,
+    DEFAULT_SSH_PORT,
+    DEFAULT_SSH_USER,
+    DEFAULT_WEB_PORT,
     DOMAIN,
     IDLE_MACHINE_STATES,
     RUNNING_MACHINE_STATES,
 )
 from .gcode_parser import GcodeModalState, GcodeProgramTimeline
+from .patch_manager import (
+    async_install_patch_ssh,
+    async_restart_controller_rts1,
+    async_uninstall_patch_ssh,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +93,12 @@ class RedlineCncData:
     vacuum_on: bool = False
     air_assist_on: bool = False
     tool_change_active: bool = False
-    aux_outputs: dict[int, bool] = field(default_factory=lambda: {0: False, 1: False})
+    aux_outputs: dict[int, bool] = field(
+        default_factory=lambda: {0: False, 1: False, 2: False, 3: False}
+    )
+    output_labels: dict[int, str] = field(
+        default_factory=lambda: {0: "OUT0", 1: "OUT1", 2: "OUT2", 3: "OUT3"}
+    )
     io_source: str = "gcode_modal"
     tools: list[dict[str, Any]] = field(default_factory=list)
     file_paths: dict[str, str] = field(default_factory=dict)
@@ -83,6 +106,14 @@ class RedlineCncData:
     camera_available: bool = False
     frame_width: int | None = None
     frame_height: int | None = None
+    patch_installed: bool = False
+    patch_version: str | None = None
+    spindle_warmup_active: bool = False
+    spindle_warmup_stage: int = 0
+    spindle_warmup_remaining_seconds: int = 0
+    spindle_warmup_status: str = "Idle"
+    macros: list[dict[str, Any]] = field(default_factory=list)
+    macro_running: bool = False
 
 
 async def async_probe_controller(
@@ -135,6 +166,10 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         port: int,
         name: str,
         enable_gcode_io: bool = True,
+        web_port: int = DEFAULT_WEB_PORT,
+        ssh_port: int = DEFAULT_SSH_PORT,
+        ssh_user: str = DEFAULT_SSH_USER,
+        ssh_password: str = DEFAULT_SSH_PASSWORD,
     ) -> None:
         """Initialize the Redline CNC coordinator."""
         super().__init__(
@@ -145,12 +180,18 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         )
         self.host = host
         self.port = port
+        self.web_port = web_port
+        self.ssh_port = ssh_port
+        self.ssh_user = ssh_user
+        self.ssh_password = ssh_password
         self.enable_gcode_io = enable_gcode_io
         self.data = RedlineCncData()
 
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._listen_task: asyncio.Task[None] | None = None
+        self._ext_poll_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        self._patch_lock = asyncio.Lock()
 
         # Camera frame state (decoded on-demand to minimize CPU load)
         self._latest_frame_b64: str | None = None
@@ -183,6 +224,11 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         return f"ws://{self.host}:{self.port}"
 
     @property
+    def web_base_url(self) -> str:
+        """Return the base HTTP URL for the RTS-X FastAPI server."""
+        return f"http://{self.host}:{self.web_port}"
+
+    @property
     def last_frame_number(self) -> int | None:
         """Return the latest camera frame number."""
         return self._latest_frame_number
@@ -209,33 +255,39 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         """Wait for the next camera frame to arrive and return its JPEG bytes."""
         self._frame_event.clear()
         try:
-            async with asyncio.timeout(timeout):
-                await self._frame_event.wait()
+            await asyncio.wait_for(self._frame_event.wait(), timeout=timeout)
         except TimeoutError:
             pass
         return self.get_latest_camera_image()
 
     async def async_start(self) -> None:
-        """Start the persistent WebSocket listener task."""
+        """Start the persistent WebSocket listener and HA extension polling tasks."""
         self._stop_event.clear()
         if self._listen_task is None or self._listen_task.done():
             self._listen_task = self.hass.async_create_background_task(
                 self._async_ws_loop(),
                 name=f"{DOMAIN}_{self.host}_{self.port}_ws",
             )
+        if self._ext_poll_task is None or self._ext_poll_task.done():
+            self._ext_poll_task = self.hass.async_create_background_task(
+                self._async_ha_ext_poll_loop(),
+                name=f"{DOMAIN}_{self.host}_{self.web_port}_ha_ext",
+            )
 
     async def async_stop(self) -> None:
-        """Stop the WebSocket listener task and close the connection."""
+        """Stop the WebSocket listener and polling tasks and close the connection."""
         self._stop_event.set()
         if self._ws is not None and not self._ws.closed:
             await self._ws.close()
-        if self._listen_task is not None:
-            self._listen_task.cancel()
-            try:
-                await self._listen_task
-            except asyncio.CancelledError:
-                pass
-            self._listen_task = None
+        for task in (self._listen_task, self._ext_poll_task):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._listen_task = None
+        self._ext_poll_task = None
 
     async def async_send_command(self, payload: dict[str, Any]) -> bool:
         """Send a JSON command over the WebSocket if connected."""
@@ -249,11 +301,309 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             return False
 
     async def async_request_refresh_all(self) -> None:
-        """Request fresh status, version, tool table, and file list from the controller."""
+        """Request fresh status, version, tool table, file list, and HA extension state."""
         await self.async_send_command({"command": CMD_REFRESH_STATUS})
         await self.async_send_command({"command": CMD_REQUEST_VERSION})
         await self.async_send_command({"command": CMD_REQUEST_TOOL_TABLE})
         await self.async_send_command({"command": CMD_REFRESH_FILE_LIST})
+        await self.async_poll_ha_extension()
+
+    async def _async_ha_ext_poll_loop(self) -> None:
+        """Periodically poll the /api/ha/status endpoint while connected."""
+        while not self._stop_event.is_set():
+            if self.data.connected:
+                try:
+                    await self.async_poll_ha_extension()
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Error polling /api/ha/status: %s", err)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=2.0)
+            except TimeoutError:
+                pass
+
+    async def async_poll_ha_extension(self) -> bool:
+        """Query GET /api/ha/status on the controller and update extension state."""
+        session = async_get_clientsession(self.hass)
+        url = f"{self.web_base_url}{API_HA_STATUS}"
+        prev_snapshot = self._state_comparison_tuple()
+
+        async def _do_get() -> None:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    payload = await resp.json(content_type=None)
+                    if isinstance(payload, dict) and payload.get("ok") is True:
+                        self._apply_ha_ext_payload(payload)
+                    else:
+                        self._clear_ha_ext_state()
+                else:
+                    self._clear_ha_ext_state()
+
+        try:
+            await asyncio.wait_for(_do_get(), timeout=3.0)
+        except Exception:  # noqa: BLE001
+            self._clear_ha_ext_state()
+
+        changed = self._state_comparison_tuple() != prev_snapshot
+        if changed:
+            self.async_set_updated_data(self.data)
+        return changed
+
+    def _apply_ha_ext_payload(self, payload: dict[str, Any]) -> None:
+        """Apply JSON returned by /api/ha/status to self.data."""
+        self.data.patch_installed = True
+        ver = payload.get("version") or payload.get("patch_version")
+        self.data.patch_version = str(ver) if ver is not None else None
+
+        outputs = payload.get("outputs")
+        if isinstance(outputs, list):
+            for idx in range(min(4, len(outputs))):
+                item = outputs[idx]
+                if isinstance(item, dict):
+                    pin_idx = int(item.get("index", idx))
+                    if 0 <= pin_idx < 4:
+                        self.data.aux_outputs[pin_idx] = bool(item.get("state", False))
+                        lbl = str(item.get("name", "")).strip()
+                        if lbl:
+                            self.data.output_labels[pin_idx] = lbl
+                else:
+                    self.data.aux_outputs[idx] = bool(item)
+            self.data.io_source = "hardware_gpio"
+
+        labels = payload.get("output_labels")
+        if isinstance(labels, list):
+            for idx in range(min(4, len(labels))):
+                lbl = str(labels[idx]).strip()
+                self.data.output_labels[idx] = lbl if lbl else f"OUT{idx}"
+
+        warmup = payload.get("spindle_warmup")
+        if isinstance(warmup, dict):
+            self.data.spindle_warmup_active = bool(warmup.get("active", False))
+            self.data.spindle_warmup_stage = int(warmup.get("stage", 0) or 0)
+            rem = warmup.get("remaining_seconds")
+            if rem is None:
+                rem = warmup.get("time_remaining", 0)
+            self.data.spindle_warmup_remaining_seconds = int(rem or 0)
+            status_str = warmup.get("status") or warmup.get("status_message") or "Idle"
+            self.data.spindle_warmup_status = str(status_str)
+
+        macros = payload.get("macros")
+        if isinstance(macros, list):
+            normalized_macros: list[dict[str, Any]] = []
+            for m in macros:
+                if isinstance(m, dict):
+                    nm = dict(m)
+                    if "path" not in nm and "file_path" in nm:
+                        nm["path"] = nm["file_path"] or ""
+                    normalized_macros.append(nm)
+            self.data.macros = normalized_macros
+
+        self.data.macro_running = bool(payload.get("macro_running", False))
+
+    def _clear_ha_ext_state(self) -> None:
+        """Reset HA extension state when patch is not installed or unreachable."""
+        self.data.patch_installed = False
+        self.data.patch_version = None
+        self.data.spindle_warmup_active = False
+        self.data.spindle_warmup_stage = 0
+        self.data.spindle_warmup_remaining_seconds = 0
+        self.data.spindle_warmup_status = "Idle"
+        self.data.macro_running = False
+
+    async def _async_post_ha_ext(
+        self,
+        path: str,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Send a POST request to a /api/ha/* endpoint and return its JSON response."""
+        if not self.data.patch_installed:
+            await self.async_poll_ha_extension()
+            if not self.data.patch_installed:
+                raise HomeAssistantError(
+                    "Redline CNC Controller Patch is not installed. Press 'Install Controller Patch' first."
+                )
+
+        session = async_get_clientsession(self.hass)
+        url = f"{self.web_base_url}{path}"
+
+        async def _do_post() -> Any:
+            async with session.post(url, json=json_body or {}) as resp:
+                return await resp.json(content_type=None)
+
+        try:
+            data = await asyncio.wait_for(_do_post(), timeout=5.0)
+        except Exception as err:  # noqa: BLE001
+            raise HomeAssistantError(
+                f"Failed to call Redline CNC endpoint {path}: {err}"
+            ) from err
+
+        if not isinstance(data, dict):
+            raise HomeAssistantError(f"Invalid response from {path}: {data}")
+        if not data.get("ok", False):
+            err_msg = data.get("error") or data.get("detail") or f"Controller rejected request to {path}"
+            raise HomeAssistantError(str(err_msg))
+        return data
+
+    @property
+    def allow_remote_motion(self) -> bool:
+        """Return True if remote spindle warmup and macro execution are enabled."""
+        if hasattr(self, "config_entry") and self.config_entry is not None:
+            return bool(
+                self.config_entry.options.get(
+                    CONF_ALLOW_REMOTE_MOTION,
+                    self.config_entry.data.get(
+                        CONF_ALLOW_REMOTE_MOTION,
+                        DEFAULT_ALLOW_REMOTE_MOTION,
+                    ),
+                )
+            )
+        return DEFAULT_ALLOW_REMOTE_MOTION
+
+    async def async_install_controller_patch(self) -> dict[str, Any]:
+        """Install the controller patch over SSH with concurrency protection."""
+        async with self._patch_lock:
+            result = await async_install_patch_ssh(
+                host=self.host,
+                port=self.ssh_port,
+                username=self.ssh_user,
+                password=self.ssh_password,
+                restart_rts1=False,
+            )
+            if not result.get("ok"):
+                raise HomeAssistantError(
+                    f"Failed to install Redline CNC controller patch: {result.get('error', 'unknown error')}"
+                )
+            await self.async_poll_ha_extension()
+            return result
+
+    async def async_uninstall_controller_patch(self) -> dict[str, Any]:
+        """Uninstall the controller patch over SSH and restore vendor-original Web_API.py."""
+        async with self._patch_lock:
+            result = await async_uninstall_patch_ssh(
+                host=self.host,
+                port=self.ssh_port,
+                username=self.ssh_user,
+                password=self.ssh_password,
+                restart_rts1=False,
+            )
+            if not result.get("ok"):
+                raise HomeAssistantError(
+                    f"Failed to uninstall Redline CNC controller patch: {result.get('error', 'unknown error')}"
+                )
+
+            self._clear_ha_ext_state()
+            self.async_set_updated_data(self.data)
+            return result
+
+    async def async_restart_rts1(self, force: bool = False) -> dict[str, Any]:
+        """Safely restart the RTS1 controller process via SSH."""
+        async with self._patch_lock:
+            if not force:
+                if self.data.is_running:
+                    raise HomeAssistantError("Cannot restart RTS1 while the machine is actively running or cutting.")
+                if self.data.spindle_on:
+                    raise HomeAssistantError("Cannot restart RTS1 while the spindle is running.")
+                if self.data.macro_running:
+                    raise HomeAssistantError("Cannot restart RTS1 while a macro is running.")
+                if self.data.spindle_warmup_active:
+                    raise HomeAssistantError("Cannot restart RTS1 while spindle warmup is active.")
+
+            result = await async_restart_controller_rts1(
+                host=self.host,
+                port=self.ssh_port,
+                username=self.ssh_user,
+                password=self.ssh_password,
+                force=force,
+            )
+            if not result.get("ok"):
+                raise HomeAssistantError(
+                    f"Failed to restart RTS1: {result.get('error', 'unknown error')}"
+                )
+
+            # Wait up to 12 seconds for RTS1 to respawn and resume answering
+            for _ in range(12):
+                await asyncio.sleep(1.0)
+                await self.async_poll_ha_extension()
+                if self.data.patch_installed:
+                    break
+
+            return result
+
+    async def async_start_spindle_warmup(self) -> dict[str, Any]:
+        """Launch the 5-stage Spindle Warmup routine on the controller."""
+        if not self.allow_remote_motion:
+            raise HomeAssistantError(
+                "Remote spindle warmup is disabled in integration options. "
+                "Enable 'Allow remote spindle and macro execution' in options to proceed."
+            )
+        res = await self._async_post_ha_ext(API_HA_WARMUP_START)
+        await self.async_poll_ha_extension()
+        return res
+
+    async def async_cancel_spindle_warmup(self) -> dict[str, Any]:
+        """Cancel an active Spindle Warmup routine and stop the spindle."""
+        res = await self._async_post_ha_ext(API_HA_WARMUP_CANCEL)
+        await self.async_poll_ha_extension()
+        return res
+
+    async def async_set_output(self, pin: int, state: bool) -> dict[str, Any]:
+        """Turn hardware auxiliary output OUT0..OUT3 on or off."""
+        if pin not in (0, 1, 2, 3):
+            raise HomeAssistantError(f"Output pin must be 0, 1, 2, or 3 (got {pin})")
+        res = await self._async_post_ha_ext(
+            API_HA_OUTPUT,
+            {"pin": int(pin), "state": bool(state)},
+        )
+        outputs = res.get("outputs")
+        if isinstance(outputs, list) and len(outputs) > pin:
+            for idx in range(min(4, len(outputs))):
+                self.data.aux_outputs[idx] = bool(outputs[idx])
+        else:
+            self.data.aux_outputs[pin] = bool(state)
+        self.data.io_source = "hardware_gpio"
+        self.async_set_updated_data(self.data)
+        return res
+
+    async def async_run_macro(self, macro: int | str) -> dict[str, Any]:
+        """Execute a configured macro by 0-based index (0..11), 1-based number, or name."""
+        if not self.allow_remote_motion:
+            raise HomeAssistantError(
+                "Remote macro execution is disabled in integration options. "
+                "Enable 'Allow remote spindle and macro execution' in options to proceed."
+            )
+        target_index: int | None = None
+        if isinstance(macro, int):
+            target_index = macro
+        elif isinstance(macro, str):
+            cleaned = macro.strip()
+            if cleaned.isdigit():
+                num = int(cleaned)
+                target_index = num - 1 if 1 <= num <= 12 else num
+            else:
+                for m in self.data.macros:
+                    if str(m.get("name", "")).strip().lower() == cleaned.lower():
+                        target_index = int(m["index"])
+                        break
+                if target_index is None:
+                    raise HomeAssistantError(
+                        f"Macro '{macro}' not found on controller"
+                    )
+        if target_index is None or not (0 <= target_index < 12):
+            raise HomeAssistantError(
+                f"Invalid macro index {target_index}; must be 0..11"
+            )
+
+        res = await self._async_post_ha_ext(
+            API_HA_MACRO_RUN,
+            {"index": int(target_index)},
+        )
+        await self.async_poll_ha_extension()
+        return res
+
+    async def async_abort_macro(self) -> dict[str, Any]:
+        """Abort an actively running macro."""
+        res = await self._async_post_ha_ext(API_HA_MACRO_ABORT)
+        await self.async_poll_ha_extension()
+        return res
 
     async def _async_ws_loop(self) -> None:
         """Background loop maintaining the WebSocket connection with backoff."""
@@ -318,6 +668,7 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.vacuum_on = False
             self.data.air_assist_on = False
             self.data.aux_outputs = {k: False for k in self.data.aux_outputs}
+            self._clear_ha_ext_state()
             self._requested_downloads.clear()
             self._download_buffers.clear()
         self.async_set_updated_data(self.data)
@@ -833,22 +1184,26 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
                 self.data.spindle_on = modal.spindle_on
                 self.data.vacuum_on = modal.vacuum_on
                 self.data.air_assist_on = modal.air_assist_on
-                for pin in (0, 1):
-                    self.data.aux_outputs[pin] = modal.aux_outputs.get(pin, False)
+                if not self.data.patch_installed:
+                    for pin in (0, 1):
+                        self.data.aux_outputs[pin] = modal.aux_outputs.get(pin, False)
             else:
                 self.data.spindle_on = False
                 self.data.vacuum_on = False
                 self.data.air_assist_on = False
-                for pin in (0, 1):
-                    self.data.aux_outputs[pin] = False
-            self.data.io_source = "gcode_modal"
+                if not self.data.patch_installed:
+                    for pin in (0, 1):
+                        self.data.aux_outputs[pin] = False
+            if not self.data.patch_installed:
+                self.data.io_source = "gcode_modal"
         else:
             if not self.data.is_running:
                 self.data.spindle_on = False
                 self.data.vacuum_on = False
                 self.data.air_assist_on = False
-                for pin in (0, 1):
-                    self.data.aux_outputs[pin] = False
+                if not self.data.patch_installed:
+                    for pin in (0, 1):
+                        self.data.aux_outputs[pin] = False
 
         state_lower = self.data.mach_state.strip().lower()
         is_tc_mach_state = (
@@ -918,9 +1273,21 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
             self.data.vacuum_on,
             self.data.air_assist_on,
             tuple(sorted(self.data.aux_outputs.items())),
+            tuple(sorted(self.data.output_labels.items())),
             self.data.camera_available,
             self.data.remaining_seconds,
             self.data.elapsed_seconds,
+            self.data.patch_installed,
+            self.data.patch_version,
+            self.data.spindle_warmup_active,
+            self.data.spindle_warmup_stage,
+            self.data.spindle_warmup_remaining_seconds,
+            self.data.spindle_warmup_status,
+            self.data.macro_running,
+            tuple(
+                (m.get("index"), m.get("name"), m.get("path"))
+                for m in self.data.macros
+            ),
         )
 
 
