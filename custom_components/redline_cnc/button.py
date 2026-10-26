@@ -25,7 +25,6 @@ async def async_setup_entry(
         RedlineCncRefreshButton(coordinator, entry.entry_id),
         RedlineCncInstallPatchButton(coordinator, entry.entry_id),
         RedlineCncUninstallPatchButton(coordinator, entry.entry_id),
-        RedlineCncRestartRts1Button(coordinator, entry.entry_id),
         RedlineCncStartSpindleWarmupButton(coordinator, entry.entry_id),
         RedlineCncCancelSpindleWarmupButton(coordinator, entry.entry_id),
         RedlineCncAbortMacroButton(coordinator, entry.entry_id),
@@ -110,31 +109,6 @@ class RedlineCncUninstallPatchButton(RedlineCncEntity, ButtonEntity):
     async def async_press(self) -> None:
         """Uninstall the controller patch and restore original Web_API.py via SSH."""
         await self.coordinator.async_uninstall_controller_patch()
-
-
-class RedlineCncRestartRts1Button(RedlineCncEntity, ButtonEntity):
-    """Button to safely restart the RTS1 controller process via SSH."""
-
-    _attr_name = "Restart RTS1"
-    _attr_icon = "mdi:restart"
-    _attr_entity_category = EntityCategory.CONFIG
-
-    def __init__(
-        self,
-        coordinator: RedlineCncCoordinator,
-        entry_id: str,
-    ) -> None:
-        """Initialize the restart RTS1 button."""
-        super().__init__(coordinator, entry_id, "restart_rts1")
-
-    @property
-    def available(self) -> bool:
-        """Return True if connected to the controller."""
-        return self.coordinator.data.connected
-
-    async def async_press(self) -> None:
-        """Restart RTS1 on the controller via SSH."""
-        await self.coordinator.async_restart_rts1()
 
 
 class RedlineCncStartSpindleWarmupButton(RedlineCncEntity, ButtonEntity):

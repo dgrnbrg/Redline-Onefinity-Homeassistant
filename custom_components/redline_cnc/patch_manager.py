@@ -656,7 +656,15 @@ def run_patch_operation(cfg: dict[str, Any]) -> dict[str, Any]:
             safe, reason = _check_machine_idle()
             if not safe:
                 return False, f"Refusing to restart RTS1: {reason}"
-        p = subprocess.run(["pkill", "-TERM", "-f", "\\./RTS1"], capture_output=True, text=True, check=False)
+        p = subprocess.run(["pkill", "-TERM", "-x", "RTS1"], capture_output=True, text=True, check=False)
+        if p.returncode != 0:
+            p = subprocess.run(["pkill", "-TERM", "-f", "/RTS1"], capture_output=True, text=True, check=False)
+        runner_script = "/home/rtcnc/rtcnc/rts1-runner.sh"
+        if os.path.exists(runner_script):
+            try:
+                subprocess.Popen(["/bin/bash", runner_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except Exception:
+                pass
         return True, f"Sent SIGTERM to RTS1 (exit {p.returncode})"
 
     try:
@@ -1076,7 +1084,15 @@ def do_restart():
         safe, reason = check_machine_idle()
         if not safe:
             return False, f"Refusing to restart RTS1: {{reason}}"
-    p = subprocess.run(["pkill", "-TERM", "-f", "\\\\./RTS1"], capture_output=True, text=True, check=False)
+    p = subprocess.run(["pkill", "-TERM", "-x", "RTS1"], capture_output=True, text=True, check=False)
+    if p.returncode != 0:
+        p = subprocess.run(["pkill", "-TERM", "-f", "/RTS1"], capture_output=True, text=True, check=False)
+    runner_script = "/home/rtcnc/rtcnc/rts1-runner.sh"
+    if os.path.exists(runner_script):
+        try:
+            subprocess.Popen(["/bin/bash", runner_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception:
+            pass
     return True, f"Sent SIGTERM to RTS1 (exit {{p.returncode}})"
 
 try:
@@ -1421,7 +1437,7 @@ async def async_install_controller_patch(
     port: int = 22,
     username: str = "rtcnc",
     password: str = "rtcnc",
-    restart_rts1: bool = False,
+    restart_rts1: bool = True,
 ) -> dict[str, Any]:
     """Install or update the Redline HA FastAPI extension on the controller via SSH."""
     cmd = _build_remote_patch_python_script("install", restart_rts1=restart_rts1)
@@ -1436,7 +1452,7 @@ async def async_uninstall_controller_patch(
     port: int = 22,
     username: str = "rtcnc",
     password: str = "rtcnc",
-    restart_rts1: bool = False,
+    restart_rts1: bool = True,
 ) -> dict[str, Any]:
     """Uninstall the Redline HA FastAPI extension and restore vendor Web_API.py via SSH."""
     cmd = _build_remote_patch_python_script("uninstall", restart_rts1=restart_rts1)

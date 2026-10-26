@@ -459,36 +459,68 @@ class RedlineCncCoordinator(DataUpdateCoordinator[RedlineCncData]):
         return DEFAULT_ALLOW_REMOTE_MOTION
 
     async def async_install_controller_patch(self) -> dict[str, Any]:
-        """Install the controller patch over SSH with concurrency protection."""
+        """Install the controller patch over SSH with concurrency protection and automatic RTS1 restart."""
         async with self._patch_lock:
+            if self.data.is_running:
+                raise HomeAssistantError("Cannot install patch: machine is actively running or cutting.")
+            if self.data.spindle_on:
+                raise HomeAssistantError("Cannot install patch: spindle is running.")
+            if self.data.macro_running:
+                raise HomeAssistantError("Cannot install patch: a macro is running.")
+            if self.data.spindle_warmup_active:
+                raise HomeAssistantError("Cannot install patch: spindle warmup is active.")
+
             result = await async_install_patch_ssh(
                 host=self.host,
                 port=self.ssh_port,
                 username=self.ssh_user,
                 password=self.ssh_password,
-                restart_rts1=False,
+                restart_rts1=True,
             )
             if not result.get("ok"):
                 raise HomeAssistantError(
                     f"Failed to install Redline CNC controller patch: {result.get('error', 'unknown error')}"
                 )
-            await self.async_poll_ha_extension()
+
+            # Wait up to 15 seconds for RTS1 to respawn and answer /api/ha/status
+            for _ in range(15):
+                await asyncio.sleep(1.0)
+                await self.async_poll_ha_extension()
+                if self.data.patch_installed:
+                    break
+
             return result
 
     async def async_uninstall_controller_patch(self) -> dict[str, Any]:
-        """Uninstall the controller patch over SSH and restore vendor-original Web_API.py."""
+        """Uninstall the controller patch over SSH, restore vendor-original Web_API.py, and restart RTS1."""
         async with self._patch_lock:
+            if self.data.is_running:
+                raise HomeAssistantError("Cannot uninstall patch: machine is actively running or cutting.")
+            if self.data.spindle_on:
+                raise HomeAssistantError("Cannot uninstall patch: spindle is running.")
+            if self.data.macro_running:
+                raise HomeAssistantError("Cannot uninstall patch: a macro is running.")
+            if self.data.spindle_warmup_active:
+                raise HomeAssistantError("Cannot uninstall patch: spindle warmup is active.")
+
             result = await async_uninstall_patch_ssh(
                 host=self.host,
                 port=self.ssh_port,
                 username=self.ssh_user,
                 password=self.ssh_password,
-                restart_rts1=False,
+                restart_rts1=True,
             )
             if not result.get("ok"):
                 raise HomeAssistantError(
                     f"Failed to uninstall Redline CNC controller patch: {result.get('error', 'unknown error')}"
                 )
+
+            # Wait up to 10 seconds for RTS1 to respawn in factory state
+            for _ in range(10):
+                await asyncio.sleep(1.0)
+                await self.async_poll_ha_extension()
+                if not self.data.patch_installed:
+                    break
 
             self._clear_ha_ext_state()
             self.async_set_updated_data(self.data)

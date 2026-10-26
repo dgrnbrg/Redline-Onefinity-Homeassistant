@@ -48,9 +48,8 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete reverse-engineered WebSocket pro
 
 ### Buttons (`button`)
 * **Refresh Status** (`button.redline_cnc_refresh_status`): Forces an immediate refresh of status, version, tool table, file tree, and HA extension state.
-* **Install Controller Patch** (`button.redline_cnc_install_controller_patch`): 1-click SSH installer that backs up `Web_API.py` to `/home/rtcnc/redline_ha_backups/`, initializes a Git repository in `/home/rtcnc/rtcnc/RTS1/_internal`, writes a read-only `Web_API.py.orig` + `.sha256` digest, and deploys `redline_ha_ext.py`.
-* **Uninstall Controller Patch** (`button.redline_cnc_uninstall_controller_patch`): 1-click SSH uninstaller that restores the exact vendor `Web_API.py` via surgical marker strip verified against SHA-256 and Git, removes `redline_ha_ext.py`, and is a safe no-op on already unpatched files.
-* **Restart RTS1** (`button.redline_cnc_restart_rts1`): Safely sends SIGTERM to restart the RTS1 controller process over SSH, with safety guards preventing restart while jobs, macros, or the spindle are active.
+* **Install Controller Patch** (`button.redline_cnc_install_controller_patch`): 1-click SSH installer that backs up `Web_API.py` to `/home/rtcnc/redline_ha_backups/`, initializes a Git repository in `/home/rtcnc/rtcnc/RTS1/_internal`, writes a read-only `Web_API.py.orig` + `.sha256` digest, deploys `redline_ha_ext.py`, and automatically restarts RTS1 (with motion/spindle safety checks) to load the patch immediately.
+* **Uninstall Controller Patch** (`button.redline_cnc_uninstall_controller_patch`): 1-click SSH uninstaller that restores the exact vendor `Web_API.py` via surgical marker strip verified against SHA-256 and Git, removes `redline_ha_ext.py`, and restarts RTS1 back into clean factory state.
 * **Start Spindle Warmup** & **Cancel Spindle Warmup**: Launch or abort the native 5-stage HMI Spindle Warmup sequence (requires enabling "Allow remote spindle warmup and macro execution" in integration options).
 * **Macro 1 – Macro 12** & **Abort Macro**: Trigger any of the 12 configured controller macros when the machine is `Ready`/`IDLE`, or abort an active macro (requires enabling remote motion in options).
 
