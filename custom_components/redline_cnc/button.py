@@ -171,6 +171,7 @@ class RedlineCncAbortMacroButton(RedlineCncEntity, ButtonEntity):
 
     _attr_name = "Abort Macro"
     _attr_icon = "mdi:stop-circle-outline"
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
@@ -195,6 +196,7 @@ class RedlineCncMacroButton(RedlineCncEntity, ButtonEntity):
     """Button to trigger one of the 12 macro slots on the Redline CNC controller."""
 
     _attr_icon = "mdi:script-text-play-outline"
+    _attr_entity_registry_enabled_default = False
 
     def __init__(
         self,
