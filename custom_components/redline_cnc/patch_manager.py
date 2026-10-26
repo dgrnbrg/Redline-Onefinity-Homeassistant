@@ -656,16 +656,18 @@ def run_patch_operation(cfg: dict[str, Any]) -> dict[str, Any]:
             safe, reason = _check_machine_idle()
             if not safe:
                 return False, f"Refusing to restart RTS1: {reason}"
-        p = subprocess.run(["pkill", "-TERM", "-x", "RTS1"], capture_output=True, text=True, check=False)
+        subprocess.run(["pkill", "-TERM", "-x", "RTS1"], capture_output=True, text=True, check=False)
+        time.sleep(1.0)
+        p = subprocess.run(["pkill", "-KILL", "-x", "RTS1"], capture_output=True, text=True, check=False)
         if p.returncode != 0:
-            p = subprocess.run(["pkill", "-TERM", "-f", "/RTS1"], capture_output=True, text=True, check=False)
+            subprocess.run(["pkill", "-KILL", "-f", "/RTS1"], capture_output=True, text=True, check=False)
         runner_script = "/home/rtcnc/rtcnc/rts1-runner.sh"
         if os.path.exists(runner_script):
             try:
                 subprocess.Popen(["/bin/bash", runner_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             except Exception:
                 pass
-        return True, f"Sent SIGTERM to RTS1 (exit {p.returncode})"
+        return True, "Restarted RTS1 and triggered rts1-runner.sh"
 
     try:
         if action == "restart":
@@ -1084,16 +1086,18 @@ def do_restart():
         safe, reason = check_machine_idle()
         if not safe:
             return False, f"Refusing to restart RTS1: {{reason}}"
-    p = subprocess.run(["pkill", "-TERM", "-x", "RTS1"], capture_output=True, text=True, check=False)
+    subprocess.run(["pkill", "-TERM", "-x", "RTS1"], capture_output=True, text=True, check=False)
+    time.sleep(1.0)
+    p = subprocess.run(["pkill", "-KILL", "-x", "RTS1"], capture_output=True, text=True, check=False)
     if p.returncode != 0:
-        p = subprocess.run(["pkill", "-TERM", "-f", "/RTS1"], capture_output=True, text=True, check=False)
+        subprocess.run(["pkill", "-KILL", "-f", "/RTS1"], capture_output=True, text=True, check=False)
     runner_script = "/home/rtcnc/rtcnc/rts1-runner.sh"
     if os.path.exists(runner_script):
         try:
             subprocess.Popen(["/bin/bash", runner_script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except Exception:
             pass
-    return True, f"Sent SIGTERM to RTS1 (exit {{p.returncode}})"
+    return True, "Restarted RTS1 and triggered rts1-runner.sh"
 
 try:
     if action == "restart":
