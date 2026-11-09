@@ -100,3 +100,36 @@ automation:
         target:
           entity_id: switch.shop_vacuum
 ```
+
+---
+
+## Redline Multi-Job Workflow Linker & Visual Batcher
+
+A standalone, cross-platform (Windows, macOS, Linux) application and directory watcher that automates multi-part CNC fixturing workflows for the Redline CNC (RTS-X) controller.
+
+### Features
+* **Automated Directory Watcher**: Automatically ingests new `.ngc` / `.gcode` files as they are exported from CAM (Fusion 360, Vectric, Carveco) with write debouncing.
+* **Multi-File CAM Job Grouping**: Automatically recognizes separate toolpath exports (e.g. `Part_1_Rough.ngc`, `Part_2_Finish.ngc`) and binds them into a single unified logical job card.
+* **Multi-Fixture WCS Switching**: Assign jobs to `G54`–`G59.3`, automatically inserting safe machine-coordinate retract transitions (`G53 G0 Z0`).
+* **Flexible Tool Strategies**:
+  * **Part-by-Part (Sequential)**: Run Part 1 complete with all tools &rarr; safe retract &rarr; Part 2.
+  * **Tool-by-Tool (Grouped)**: Run Tool 1 across all fixtures &rarr; tool change &rarr; run Tool 2 across all fixtures, minimizing tool changes.
+  * **Split-by-Tool**: Generate separate files per tool (`batch_T1.ngc`, `batch_T2.ngc`).
+* **Z-Origin Heuristics & Spoilboard Limit**: Detects whether zero is on the stock top vs. machine bed, enforcing a $0.05\text{ in}$ ($1.27\text{ mm}$) spoilboard cut-through limit to flag unknown origins.
+* **Air Carve Dry Run Mode**: Easily adjusts height (default $+25\text{ mm}$) and **automatically suppresses all vacuum (`M8`) and coolant (`M7`)**.
+* **Interactive 3D WebGL Viewer & Scrubber**: Bi-directional playback (▶ / ◀), speed control (`0.5x`–`50x`), live $(X, Y, Z)$ telemetry HUD, and 1-click **visual pause (`M0`/`M1`) insertion** with safe Z or gantry park retract options.
+* **Controller `gcode/workflow/` Integration**:
+  * Auto-syncs to the Redline controller after an idle timer (10s).
+  * Automatically replaces earlier iterations of the same logical workflow key (`WF_<part>_<wcs>_*`), keeping the HMI clean.
+  * Automatically prunes stale workflow files older than the configured TTL (default 24h).
+
+### Quick Start
+```bash
+# Launch the web application (opens http://localhost:8088 in your browser)
+python3 -m redline_job_linker
+
+# Optional CLI flags
+python3 -m redline_job_linker --port 8088 --watch-dir "/path/to/cam/exports" --controller-host "192.168.1.150"
+```
+
+

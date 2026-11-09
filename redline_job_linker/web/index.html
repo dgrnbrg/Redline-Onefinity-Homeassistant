@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Redline Multi-Job Workflow Linker</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --bg-panel: #1e293b;
+      --bg-card: #334155;
+      --border: #475569;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #0ea5e9;
+      --accent-hover: #38bdf8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --amber-glow: rgba(245, 158, 11, 0.2);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      background: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+      z-index: 20;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.1rem; }
+    .brand svg { fill: #ef4444; width: 22px; height: 22px; }
+    .status-badges { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 10px; border-radius: 9999px; font-weight: 600;
+    }
+    .badge-conn-ok { background: rgba(16, 185, 129, 0.15); color: var(--success); border: 1px solid var(--success); }
+    .badge-conn-off { background: rgba(148, 163, 184, 0.15); color: var(--text-muted); border: 1px solid var(--border); }
+    .badge-aircarve {
+      background: rgba(245, 158, 11, 0.2); color: var(--warning); border: 1px solid var(--warning);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+    /* Mobile tabs */
+    .mobile-nav {
+      display: none;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-shrink: 0;
+    }
+    .mobile-tab-btn {
+      flex: 1; padding: 12px; text-align: center; font-weight: 600; font-size: 0.85rem;
+      background: none; border: none; color: var(--text-muted); cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+    .mobile-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); background: rgba(14, 165, 233, 0.05); }
+
+    /* Main layout container */
+    main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+      position: relative;
+    }
+    .pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .pane-left {
+      width: 480px; flex: none; border-right: 1px solid var(--border);
+      background: var(--bg-dark);
+      overflow-y: auto;
+    }
+    .pane-right { flex: 1; background: #000; position: relative; display: flex; flex-direction: column; }
+
+    @media (max-width: 1023px) {
+      .mobile-nav { display: flex; }
+      .pane-left, .pane-right {
+        display: none; width: 100%; height: 100%; border: none;
+      }
+      .pane-left.tab-active, .pane-right.tab-active { display: flex; }
+    }
+
+    /* Section components */
+    .section-title {
+      font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--text-muted); font-weight: 700; margin-bottom: 8px;
+    }
+    .card {
+      background: var(--bg-panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px; margin-bottom: 12px;
+    }
+    .btn {
+      background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border);
+      padding: 6px 12px; border-radius: 6px; font-weight: 600; font-size: 0.85rem;
+      cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn:hover { background: #475569; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-success { background: var(--success); border-color: var(--success); color: #fff; }
+    .btn-warning { background: var(--warning); border-color: var(--warning); color: #000; }
+    .btn-sm { padding: 4px 8px; font-size: 0.75rem; }
+
+    /* 3D Viewport & HUD */
+    #glCanvas { width: 100%; height: 100%; display: block; }
+    .viewport-overlay {
+      position: absolute; top: 12px; left: 12px;
+      display: flex; gap: 6px; z-index: 10;
+    }
+    .telemetry-hud {
+      position: absolute; top: 12px; right: 12px;
+      background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 14px; font-family: monospace; font-size: 0.8rem;
+      z-index: 10; pointer-events: none;
+    }
+    .telemetry-row { display: flex; justify-content: space-between; gap: 16px; margin-bottom: 2px; }
+    .telemetry-val { color: var(--accent); font-weight: 700; }
+
+    /* Timeline & Scrubber Panel */
+    .scrubber-panel {
+      background: var(--bg-panel); border-top: 1px solid var(--border);
+      padding: 10px 16px; display: flex; flex-direction: column; gap: 8px;
+      z-index: 15; flex-shrink: 0;
+    }
+    .scrubber-slider-wrap {
+      position: relative; width: 100%; height: 26px; display: flex; align-items: center;
+    }
+    .scrubber-slider {
+      width: 100%; -webkit-appearance: none; appearance: none;
+      height: 8px; border-radius: 4px; background: var(--bg-card);
+      outline: none; cursor: pointer;
+    }
+    .scrubber-slider::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: var(--accent); cursor: pointer; border: 2px solid #fff;
+    }
+    .pause-marker-pin {
+      position: absolute; top: 2px; width: 4px; height: 14px;
+      background: var(--warning); border-radius: 2px; pointer-events: none;
+      transform: translateX(-50%);
+    }
+    .playback-controls {
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    }
+    .btn-group { display: flex; align-items: center; gap: 4px; }
+
+    /* Fixture Slot Styles */
+    .slot-card {
+      background: var(--bg-panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px; margin-bottom: 10px;
+      border-left: 4px solid var(--accent);
+    }
+    .slot-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 8px; font-weight: 700; font-size: 0.9rem;
+    }
+    .slot-row {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 8px; font-size: 0.85rem;
+    }
+    select, input[type="text"], input[type="number"] {
+      background: var(--bg-dark); color: var(--text-main); border: 1px solid var(--border);
+      padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; outline: none;
+    }
+
+    /* Modal dialog */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px); display: none; align-items: center;
+      justify-content: center; z-index: 100;
+    }
+    .modal-dialog {
+      background: var(--bg-panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px; width: 90%; max-width: 500px;
+      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Header -->
+  <header>
+    <div class="brand">
+      <svg viewBox="0 0 24 24"><path d="M12 2L2 22h20L12 2zm0 3.5L18.5 20H5.5L12 5.5z"/></svg>
+      <span>Redline Workflow Linker</span>
+    </div>
+    <div class="status-badges">
+      <div id="aircarveBanner" class="badge badge-aircarve" style="display: none;">
+        ⚠ AIR CARVE ACTIVE (+25mm, M7/M8 Suppressed)
+      </div>
+      <div id="connBadge" class="badge badge-conn-off">
+        <span class="dot">●</span> Controller: Offline
+      </div>
+      <button class="btn btn-sm" onclick="App.openSettings()">⚙ Settings</button>
+    </div>
+  </header>
+
+  <!-- Mobile Tab Navigation -->
+  <div class="mobile-nav">
+    <button class="mobile-tab-btn active" onclick="App.switchMobileTab('sequence')">1. Sequence & Jobs</button>
+    <button class="mobile-tab-btn" onclick="App.switchMobileTab('viewer')">2. 3D Preview & Scrub</button>
+    <button class="mobile-tab-btn" onclick="App.switchMobileTab('controller')">3. Controller Sync</button>
+  </div>
+
+  <!-- Main Workspace -->
+  <main>
+    <!-- Left Pane: Staging Drawer + Active Fixture Sequencer -->
+    <div id="paneLeft" class="pane pane-left tab-active" style="padding: 16px;">
+
+      <!-- Auto-Sync Countdown Alert -->
+      <div id="autoSyncAlert" class="card" style="display: none; background: rgba(14, 165, 233, 0.15); border-color: var(--accent);">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <span style="font-weight: 600; font-size: 0.85rem;" id="autoSyncTimerText">Auto-syncing to controller in 10s...</span>
+          <div class="btn-group">
+            <button class="btn btn-primary btn-sm" onclick="App.syncNow()">Sync Now</button>
+            <button class="btn btn-sm" onclick="App.cancelAutoSync()">Cancel</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section: Active Fixture Sequencer -->
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+        <span class="section-title">Fixture Sequence (Multi-Part Run)</span>
+        <div class="btn-group">
+          <button class="btn btn-sm btn-success" onclick="App.syncNow()">⚡ Upload to RTS-X</button>
+        </div>
+      </div>
+
+      <!-- Batch Strategy Selector -->
+      <div class="card" style="padding: 10px 12px;">
+        <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px; font-weight: 600;">EXECUTION STRATEGY:</div>
+        <div style="display: flex; gap: 12px; font-size: 0.85rem;">
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+            <input type="radio" name="batchStrategy" value="part_by_part" checked onchange="App.onStrategyChanged(this.value)">
+            Part-by-Part (Sequential)
+          </label>
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+            <input type="radio" name="batchStrategy" value="tool_by_tool" onchange="App.onStrategyChanged(this.value)">
+            Tool-by-Tool (Grouped)
+          </label>
+        </div>
+      </div>
+
+      <!-- Fixture Slots Container -->
+      <div id="fixtureSlotsContainer">
+        <div style="text-align: center; padding: 24px 0; color: var(--text-muted); font-size: 0.85rem;">
+          No jobs in fixture sequence yet.<br>Click <strong>"+ Add to Sequence"</strong> from the staging bin below.
+        </div>
+      </div>
+
+      <!-- Section: Incoming Staged Jobs from Watched Directory -->
+      <div style="display: flex; align-items: center; justify-content: space-between; margin: 20px 0 8px 0;">
+        <span class="section-title">Incoming Staging Bin (Watched CAM Folder)</span>
+        <button class="btn btn-sm" onclick="App.refreshStaged()">🔄 Rescan</button>
+      </div>
+
+      <div id="stagedJobsList">
+        <div style="color: var(--text-muted); font-size: 0.85rem; padding: 12px 0;">
+          Scanning watched folder...
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right Pane: 3D WebGL Toolpath Viewport + Interactive Scrubber -->
+    <div id="paneRight" class="pane pane-right">
+      <!-- 3D Canvas -->
+      <canvas id="glCanvas"></canvas>
+
+      <!-- Viewport Angle Overlays -->
+      <div class="viewport-overlay">
+        <button class="btn btn-sm" onclick="GcodeViewer.setView('iso')">Isometric</button>
+        <button class="btn btn-sm" onclick="GcodeViewer.setView('top')">Top (XY)</button>
+        <button class="btn btn-sm" onclick="GcodeViewer.setView('front')">Front (XZ)</button>
+        <button class="btn btn-sm" onclick="GcodeViewer.resetCamera()">Reset</button>
+      </div>
+
+      <!-- Telemetry HUD -->
+      <div class="telemetry-hud">
+        <div class="telemetry-row"><span>Line:</span><span id="hudLine" class="telemetry-val">0</span></div>
+        <div class="telemetry-row"><span>Command:</span><span id="hudCmd" class="telemetry-val">G0</span></div>
+        <div class="telemetry-row"><span>Position:</span><span id="hudPos" class="telemetry-val">X 0.0 Y 0.0 Z 0.0</span></div>
+        <div class="telemetry-row"><span>Feed:</span><span id="hudFeed" class="telemetry-val">0 mm/min</span></div>
+        <div class="telemetry-row"><span>Tool:</span><span id="hudTool" class="telemetry-val">T1</span></div>
+      </div>
+
+      <!-- Scrubber Panel -->
+      <div class="scrubber-panel">
+        <div class="scrubber-slider-wrap">
+          <input type="range" id="scrubberSlider" class="scrubber-slider" min="0" max="100" value="0" oninput="App.onScrub(this.value)">
+          <div id="pauseMarkersTrack" style="position: absolute; inset: 0; pointer-events: none;"></div>
+        </div>
+
+        <div class="playback-controls">
+          <div class="btn-group">
+            <button class="btn btn-sm" onclick="App.step(-1)" title="Step Back">⏮</button>
+            <button class="btn btn-sm" id="btnPlayRev" onclick="App.togglePlay(-1)" title="Play Reverse">◀</button>
+            <button class="btn btn-sm" id="btnPlayFwd" onclick="App.togglePlay(1)" title="Play Forward">▶</button>
+            <button class="btn btn-sm" onclick="App.step(1)" title="Step Forward">⏭</button>
+          </div>
+
+          <!-- Playback Speed -->
+          <div class="btn-group">
+            <span style="font-size: 0.8rem; color: var(--text-muted); margin-right: 4px;">Speed:</span>
+            <select id="playbackSpeed" onchange="App.setPlaybackSpeed(this.value)" style="padding: 2px 6px; font-size: 0.8rem;">
+              <option value="0.5">0.5x</option>
+              <option value="1.0" selected>1.0x</option>
+              <option value="2.0">2.0x</option>
+              <option value="5.0">5.0x</option>
+              <option value="10.0">10x</option>
+              <option value="50.0">50x</option>
+            </select>
+          </div>
+
+          <!-- Visual Pause Insertion -->
+          <button class="btn btn-sm btn-warning" onclick="App.openInsertPauseDialog()">
+            ⏸ Insert Pause at Current Line
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Pause Insertion Modal Dialog -->
+  <div id="pauseModal" class="modal-backdrop">
+    <div class="modal-dialog">
+      <h3 style="margin-bottom: 12px; font-size: 1.1rem;">Insert Visual Pause</h3>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
+        Line: <strong id="modalPauseLine">0</strong> | Target Tool: <strong id="modalPauseTool">T1</strong>
+      </p>
+
+      <div style="margin-bottom: 12px;">
+        <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">PAUSE TYPE:</label>
+        <select id="modalPauseType" style="width: 100%;">
+          <option value="M0">M0 - Unconditional Stop (Requires Cycle Start to Resume)</option>
+          <option value="M1">M1 - Optional Stop</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">RETRACTION BEHAVIOR:</label>
+        <select id="modalPauseRetract" style="width: 100%;">
+          <option value="safe_z">Safe Z Retract Only (G53 G0 Z0)</option>
+          <option value="gantry_park">Gantry Park Retract (G53 Z0 then Move Gantry to Clearance)</option>
+        </select>
+      </div>
+
+      <div style="margin-bottom: 16px;">
+        <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">MESSAGE TO OPERATOR (OPTIONAL):</label>
+        <input type="text" id="modalPauseMsg" placeholder="e.g. Check clamp clearance, Insert brass nuts" style="width: 100%;">
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn" onclick="App.closeInsertPauseDialog()">Cancel</button>
+        <button class="btn btn-primary" onclick="App.confirmInsertPause()">Save Pause</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal Dialog -->
+  <div id="settingsModal" class="modal-backdrop">
+    <div class="modal-dialog">
+      <h3 style="margin-bottom: 12px; font-size: 1.1rem;">Settings</h3>
+
+      <div style="margin-bottom: 12px;">
+        <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">LOCAL WATCHED CAM DIRECTORY:</label>
+        <input type="text" id="cfgWatchedDir" style="width: 100%;" placeholder="/path/to/cam/exports">
+      </div>
+
+      <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+        <div style="flex: 2;">
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">CONTROLLER IP / HOST:</label>
+          <input type="text" id="cfgHost" style="width: 100%;" value="192.168.1.150">
+        </div>
+        <div style="flex: 1;">
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">PORT:</label>
+          <input type="number" id="cfgPort" style="width: 100%;" value="8080">
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; margin-bottom: 12px;">
+        <div style="flex: 1;">
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">STALE JOB TTL (HOURS):</label>
+          <input type="number" id="cfgTtl" style="width: 100%;" value="24" min="1">
+        </div>
+        <div style="flex: 1;">
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">AUTO-SYNC IDLE (SEC):</label>
+          <input type="number" id="cfgAutoSyncIdle" style="width: 100%;" value="10" min="2">
+        </div>
+      </div>
+
+      <div style="margin-bottom: 16px;">
+        <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">CUSTOM EPILOGUE G-CODE:</label>
+        <textarea id="cfgEpilogue" rows="4" style="width: 100%; background: var(--bg-dark); color: var(--text-main); border: 1px solid var(--border); border-radius: 6px; padding: 6px; font-family: monospace; font-size: 0.8rem;"></textarea>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button class="btn" onclick="App.closeSettings()">Cancel</button>
+        <button class="btn btn-primary" onclick="App.saveSettings()">Save Configuration</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/gcode_viewer.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
