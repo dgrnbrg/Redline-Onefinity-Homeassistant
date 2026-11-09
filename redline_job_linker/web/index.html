@@ -76,20 +76,49 @@
       overflow: hidden;
       position: relative;
     }
-    .pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; transition: all 0.2s ease; }
     .pane-left {
-      width: 480px; flex: none; border-right: 1px solid var(--border);
+      width: 440px; flex: none; border-right: 1px solid var(--border);
       background: var(--bg-dark);
       overflow-y: auto;
     }
-    .pane-right { flex: 1; background: #000; position: relative; display: flex; flex-direction: column; }
+    .pane-right { flex: 1; min-width: 320px; background: #000; position: relative; display: flex; flex-direction: column; }
+    .pane-editor {
+      width: 440px; flex: none; border-left: 1px solid var(--border);
+      background: var(--bg-dark); display: flex; flex-direction: column; overflow: hidden;
+    }
+    .pane.collapsed {
+      width: 42px !important; min-width: 42px !important; max-width: 42px !important; flex: none !important;
+      overflow: hidden; cursor: pointer;
+    }
+    .pane.collapsed .pane-body,
+    .pane.collapsed canvas,
+    .pane.collapsed .scrubber-panel,
+    .pane.collapsed .telemetry-hud,
+    .pane.collapsed .viewport-overlay {
+      display: none !important;
+    }
+    .pane.collapsed .pane-collapse-strip {
+      display: flex !important;
+    }
+    .pane-collapse-strip {
+      display: none; width: 100%; height: 100%;
+      align-items: center; justify-content: center;
+      writing-mode: vertical-rl; text-orientation: mixed;
+      font-weight: 700; font-size: 0.82rem; letter-spacing: 1px;
+      color: var(--accent); padding: 12px 0; background: var(--bg-panel);
+      user-select: none; cursor: pointer;
+    }
+    .pane-collapse-strip:hover {
+      background: rgba(14, 165, 233, 0.1);
+    }
 
-    @media (max-width: 1023px) {
+    @media (max-width: 1100px) {
       .mobile-nav { display: flex; }
-      .pane-left, .pane-right {
-        display: none; width: 100%; height: 100%; border: none;
+      .pane-left, .pane-right, .pane-editor {
+        display: none !important; width: 100% !important; height: 100% !important; border: none !important;
       }
-      .pane-left.tab-active, .pane-right.tab-active { display: flex; }
+      .pane-left.tab-active, .pane-right.tab-active, .pane-editor.tab-active { display: flex !important; }
     }
 
     /* Section components */
@@ -113,6 +142,26 @@
     .btn-success { background: var(--success); border-color: var(--success); color: #fff; }
     .btn-warning { background: var(--warning); border-color: var(--warning); color: #000; }
     .btn-sm { padding: 4px 8px; font-size: 0.75rem; }
+    .btn-collapse {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      padding: 4px 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+    }
+    .btn-collapse:hover {
+      color: var(--text-main);
+      background: #475569;
+      border-color: var(--text-muted);
+    }
+    .btn-collapse:disabled {
+      opacity: 0.4 !important;
+      cursor: not-allowed !important;
+    }
 
     /* 3D Viewport & HUD */
     #glCanvas { width: 100%; height: 100%; display: block; }
@@ -150,9 +199,75 @@
       background: var(--accent); cursor: pointer; border: 2px solid #fff;
     }
     .pause-marker-pin {
-      position: absolute; top: 2px; width: 4px; height: 14px;
-      background: var(--warning); border-radius: 2px; pointer-events: none;
+      position: absolute; top: 2px; width: 4px; height: 16px;
+      background: var(--warning); border-radius: 2px; pointer-events: auto;
+      transform: translateX(-50%); z-index: 7; cursor: pointer;
+      box-shadow: 0 0 3px rgba(0, 0, 0, 0.5);
+    }
+    .pause-marker-pin:hover {
+      transform: translateX(-50%) scaleY(1.2);
+      background: #fbbf24;
+    }
+    .rapid-marker-dot {
+      position: absolute; top: 50%; transform: translate(-50%, -50%);
+      width: 9px; height: 9px; border-radius: 50%; background: #f43f5e;
+      border: 1.5px solid #ffffff; cursor: pointer; pointer-events: auto; z-index: 6;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+      transition: transform 0.12s ease, box-shadow 0.12s ease;
+    }
+    .rapid-marker-dot:hover {
+      transform: translate(-50%, -50%) scale(1.6);
+      background: #fb7185;
+      box-shadow: 0 0 8px #f43f5e;
+      z-index: 10;
+    }
+
+    /* Map pins for Tool Changes and Parts/Operations */
+    .timeline-map-pin {
+      position: absolute;
+      top: -24px;
       transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      cursor: pointer;
+      pointer-events: auto;
+      z-index: 12;
+      transition: transform 0.12s ease, z-index 0.12s ease;
+    }
+    .timeline-map-pin:hover {
+      transform: translateX(-50%) scale(1.25);
+      z-index: 25;
+    }
+    .timeline-map-pin-badge {
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 0.65rem;
+      font-weight: 700;
+      color: #ffffff;
+      border: 1px solid rgba(255, 255, 255, 0.85);
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+      white-space: nowrap;
+      letter-spacing: 0.3px;
+    }
+    .timeline-map-pin-needle {
+      width: 2px;
+      height: 8px;
+    }
+
+    /* Interactive staged job cards */
+    .staged-job-card {
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+    }
+    .staged-job-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 2px 12px rgba(14, 165, 233, 0.18);
+    }
+    .staged-job-card.selected {
+      border-color: var(--accent) !important;
+      border-left: 5px solid var(--accent) !important;
+      background: rgba(14, 165, 233, 0.12) !important;
+      box-shadow: 0 0 0 1px var(--accent), 0 3px 12px rgba(14, 165, 233, 0.25) !important;
     }
     .playback-controls {
       display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
@@ -203,55 +318,77 @@
       <div id="aircarveBanner" class="badge badge-aircarve" style="display: none;">
         ⚠ AIR CARVE ACTIVE (+25mm, M7/M8 Suppressed)
       </div>
-      <div id="connBadge" class="badge badge-conn-off">
+      <div id="connBadge" class="badge badge-conn-off" onclick="App.openSyncDiagModal()" style="cursor: pointer;" title="Click to view connection diagnostics">
         <span class="dot">●</span> Controller: Offline
       </div>
+      <button class="btn btn-sm" onclick="App.openSyncDiagModal()" title="View Controller Sync Diagnostics & Logs">📡 Sync Logs</button>
       <button class="btn btn-sm" onclick="App.openSettings()">⚙ Settings</button>
     </div>
   </header>
 
-  <!-- Mobile Tab Navigation -->
-  <div class="mobile-nav">
-    <button class="mobile-tab-btn active" onclick="App.switchMobileTab('sequence')">1. Sequence & Jobs</button>
-    <button class="mobile-tab-btn" onclick="App.switchMobileTab('viewer')">2. 3D Preview & Scrub</button>
-    <button class="mobile-tab-btn" onclick="App.switchMobileTab('controller')">3. Controller Sync</button>
+  <!-- Sync Notification Toast Banner -->
+  <div id="syncToast" style="display: none; position: fixed; top: 62px; right: 20px; z-index: 999; max-width: 480px; padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); font-size: 0.85rem; align-items: center; justify-content: space-between; gap: 12px; transition: all 0.2s ease;">
+    <span id="syncToastMsg" style="flex: 1;"></span>
+    <div style="display: flex; gap: 6px; align-items: center;">
+      <button id="btnToastDiag" class="btn btn-sm" onclick="App.openSyncDiagModal()" style="display: none; padding: 2px 8px; font-size: 0.75rem;">Diagnostics</button>
+      <button id="btnToastRetry" class="btn btn-sm btn-primary" onclick="App.syncNow()" style="display: none; padding: 2px 8px; font-size: 0.75rem;">Retry</button>
+      <button class="btn btn-sm" onclick="App.dismissToast()" style="padding: 2px 6px; font-size: 0.8rem; background: transparent; border: none; cursor: pointer;">✕</button>
+    </div>
   </div>
 
   <!-- Main Workspace -->
   <main>
     <!-- Left Pane: Staging Drawer + Active Fixture Sequencer -->
-    <div id="paneLeft" class="pane pane-left tab-active" style="padding: 16px;">
+    <div id="paneLeft" class="pane pane-left tab-active">
+      <div class="pane-collapse-strip" onclick="App.togglePaneCollapse('paneLeft')" title="Click to expand Fixture Sequence & Jobs">
+        📋 SEQUENCE &amp; JOBS (EXPAND)
+      </div>
 
-      <!-- Auto-Sync Countdown Alert -->
-      <div id="autoSyncAlert" class="card" style="display: none; background: rgba(14, 165, 233, 0.15); border-color: var(--accent);">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <span style="font-weight: 600; font-size: 0.85rem;" id="autoSyncTimerText">Auto-syncing to controller in 10s...</span>
-          <div class="btn-group">
-            <button class="btn btn-primary btn-sm" onclick="App.syncNow()">Sync Now</button>
-            <button class="btn btn-sm" onclick="App.cancelAutoSync()">Cancel</button>
+      <div class="pane-body" style="display: flex; flex-direction: column; height: 100%; overflow-y: auto; padding: 16px;">
+        <!-- Auto-Sync Countdown Alert -->
+        <div id="autoSyncAlert" class="card" style="display: none; background: rgba(14, 165, 233, 0.15); border-color: var(--accent);">
+          <div style="display: flex; align-items: center; justify-content: space-between;">
+            <span style="font-weight: 600; font-size: 0.85rem;" id="autoSyncTimerText">Auto-syncing to controller in 10s...</span>
+            <div class="btn-group">
+              <button class="btn btn-primary btn-sm" onclick="App.syncNow()">Sync Now</button>
+              <button class="btn btn-sm" onclick="App.cancelAutoSync()">Cancel</button>
+            </div>
           </div>
         </div>
-      </div>
 
-      <!-- Section: Active Fixture Sequencer -->
-      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-        <span class="section-title">Fixture Sequence (Multi-Part Run)</span>
-        <div class="btn-group">
-          <button class="btn btn-sm btn-success" onclick="App.syncNow()">⚡ Upload to RTS-X</button>
+        <!-- Section: Active Fixture Sequencer -->
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+          <span class="section-title">Fixture Sequence (Multi-Part Run)</span>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-success" onclick="App.syncNow()" title="Upload workflow to RTS-X controller">⚡ Upload to RTS-X</button>
+            <button id="btnCollapse_paneLeft" class="btn btn-sm btn-collapse" onclick="App.togglePaneCollapse('paneLeft')" title="Collapse left pane">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-top;">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <line x1="9" y1="3" x2="9" y2="21"/>
+                <path d="M14 9l-3 3 3 3"/>
+              </svg>
+              Collapse
+            </button>
+          </div>
         </div>
-      </div>
 
-      <!-- Batch Strategy Selector -->
+      <!-- Batch Strategy Selector & Single Part Mode Checkbox -->
       <div class="card" style="padding: 10px 12px;">
         <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px; font-weight: 600;">EXECUTION STRATEGY:</div>
-        <div style="display: flex; gap: 12px; font-size: 0.85rem;">
-          <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+        <div style="display: flex; gap: 16px; font-size: 0.85rem; flex-wrap: wrap;">
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
             <input type="radio" name="batchStrategy" value="part_by_part" checked onchange="App.onStrategyChanged(this.value)">
             Part-by-Part (Sequential)
           </label>
-          <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
             <input type="radio" name="batchStrategy" value="tool_by_tool" onchange="App.onStrategyChanged(this.value)">
             Tool-by-Tool (Grouped)
+          </label>
+        </div>
+        <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);">
+          <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 0.82rem; color: var(--text-main);">
+            <input type="checkbox" id="chkSinglePartMode" onchange="App.onSinglePartToggle(this.checked)">
+            <span><strong>Single Part Mode:</strong> Preserve original WCS (do not switch/override fixture coordinate systems)</span>
           </label>
         </div>
       </div>
@@ -265,8 +402,33 @@
 
       <!-- Section: Incoming Staged Jobs from Watched Directory -->
       <div style="display: flex; align-items: center; justify-content: space-between; margin: 20px 0 8px 0;">
-        <span class="section-title">Incoming Staging Bin (Watched CAM Folder)</span>
-        <button class="btn btn-sm" onclick="App.refreshStaged()">🔄 Rescan</button>
+        <span class="section-title" style="margin-bottom: 0;">Incoming Staging Bin</span>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <span id="stagedCountBadge" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+          <button class="btn btn-sm" onclick="App.refreshStaged()">🔄 Rescan</button>
+        </div>
+      </div>
+
+      <!-- Search, Autocomplete & Time Window Filter Controls -->
+      <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
+        <div style="position: relative; display: flex; align-items: center;">
+          <input type="text" id="stagedSearchInput" list="stagedAutocompleteList"
+                 placeholder="Search or autocomplete jobs, tools, ops..."
+                 oninput="App.onStagedSearch(this.value)"
+                 style="width: 100%; padding: 6px 28px 6px 10px; font-size: 0.82rem; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-main);">
+          <button id="btnClearStagedSearch" onclick="App.clearStagedSearch()"
+                  title="Clear filter"
+                  style="display: none; position: absolute; right: 8px; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.9rem; padding: 2px 4px;">✕</button>
+          <datalist id="stagedAutocompleteList"></datalist>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+          <div style="display: flex; gap: 4px;">
+            <button id="btnFilter24h" class="btn btn-sm btn-primary" onclick="App.setStagedTimeFilter('24h')">⏱ Past 24h</button>
+            <button id="btnFilterAll" class="btn btn-sm" onclick="App.setStagedTimeFilter('all')">📁 All Files</button>
+          </div>
+          <span id="stagedActiveFilterNote" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+        </div>
       </div>
 
       <div id="stagedJobsList">
@@ -275,63 +437,160 @@
         </div>
       </div>
 
+      </div> <!-- /pane-body -->
+    </div> <!-- /paneLeft -->
+
+    <!-- Center Pane: 3D WebGL Toolpath Viewport + Interactive Scrubber -->
+    <div id="paneRight" class="pane pane-right">
+      <div class="pane-collapse-strip" onclick="App.togglePaneCollapse('paneRight')" title="Click to expand 3D view">
+        👁 3D VIEWPORT (EXPAND)
+      </div>
+
+      <div class="pane-body" style="display: flex; flex-direction: column; width: 100%; height: 100%; position: relative;">
+        <!-- 3D Canvas -->
+        <canvas id="glCanvas"></canvas>
+
+        <!-- Viewport Angle Overlays -->
+        <div class="viewport-overlay">
+          <button class="btn btn-sm" onclick="GcodeViewer.setView('iso')">Isometric</button>
+          <button class="btn btn-sm" onclick="GcodeViewer.setView('top')">Top (XY)</button>
+          <button class="btn btn-sm" onclick="GcodeViewer.setView('front')">Front (XZ)</button>
+          <button class="btn btn-sm" onclick="GcodeViewer.resetCamera()">Reset</button>
+        </div>
+
+        <!-- Top Right Control & Telemetry HUD -->
+        <div class="pane-top-right-bar" style="position: absolute; top: 12px; right: 12px; z-index: 20; display: flex; flex-direction: column; align-items: flex-end; gap: 8px;">
+          <button id="btnCollapse_paneRight" class="btn btn-sm btn-collapse" onclick="App.togglePaneCollapse('paneRight')" title="Collapse 3D view pane">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-top;">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+              <line x1="12" y1="3" x2="12" y2="21"/>
+            </svg>
+            Collapse
+          </button>
+          <div class="telemetry-hud" style="position: static;">
+            <div class="telemetry-row"><span>Line:</span><span id="hudLine" class="telemetry-val">0</span></div>
+            <div class="telemetry-row"><span>Command:</span><span id="hudCmd" class="telemetry-val">G0</span></div>
+            <div class="telemetry-row"><span>Position:</span><span id="hudPos" class="telemetry-val">X 0.0 Y 0.0 Z 0.0</span></div>
+            <div class="telemetry-row"><span>Feed:</span><span id="hudFeed" class="telemetry-val">0 mm/min</span></div>
+            <div class="telemetry-row"><span>Tool:</span><span id="hudTool" class="telemetry-val">T1</span></div>
+          </div>
+        </div>
+
+        <!-- Safe Z Threshold & Rapid Differentiation Draggable Widget -->
+        <div id="safeZWidget" style="background: var(--bg-card); border-top: 1px solid var(--border); padding: 8px 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; z-index: 10;">
+          <div style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
+            <span style="font-weight: 600; font-size: 0.8rem; color: var(--accent); display: flex; align-items: center; gap: 4px;">
+              ↕ Safe Z Retract:
+            </span>
+            <span id="safeZValDisplay" style="font-family: monospace; font-weight: 700; font-size: 0.82rem; color: #fbbf24;">0.000</span>
+          </div>
+
+          <div style="flex: 1; min-width: 180px; display: flex; align-items: center; gap: 8px;">
+            <span id="safeZMinDisplay" style="font-size: 0.72rem; color: var(--text-muted); font-family: monospace;">-10.0</span>
+            <input type="range" id="safeZSlider" min="-10" max="50" step="0.05" value="5"
+                   style="flex: 1; accent-color: #fbbf24; cursor: ew-resize;"
+                   oninput="App.onSafeZThresholdChange(parseFloat(this.value))">
+            <span id="safeZMaxDisplay" style="font-size: 0.72rem; color: var(--text-muted); font-family: monospace;">+25.0</span>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 10px; font-size: 0.72rem; white-space: nowrap;">
+            <span style="display: inline-flex; align-items: center; gap: 4px;" title="Rapid move below Safe Z (stepovers between passes)">
+              <span style="display: inline-block; width: 10px; height: 3px; background: #f43f5e; border-radius: 2px;"></span> Stepover Rapid
+            </span>
+            <span style="display: inline-flex; align-items: center; gap: 4px;" title="Rapid move at or above Safe Z (retract between operations)">
+              <span style="display: inline-block; width: 10px; height: 3px; background: #fbbf24; border-radius: 2px;"></span> Op Change Rapid
+            </span>
+            <button class="btn btn-sm" onclick="App.resetSafeZToInferred()" title="Reset to auto-inferred safe Z height" style="padding: 2px 7px; font-size: 0.7rem;">Auto Reset</button>
+          </div>
+        </div>
+
+        <!-- Scrubber Panel -->
+        <div class="scrubber-panel">
+          <div class="scrubber-slider-wrap" style="position: relative; width: 100%; height: 34px; margin-top: 14px; display: flex; align-items: center;">
+            <input type="range" id="scrubberSlider" class="scrubber-slider" min="0" max="100" step="0.01" value="0" oninput="App.onScrub(this.value)">
+            <div id="timelineMarkersTrack" style="position: absolute; inset: 0; pointer-events: none;"></div>
+            <div id="pauseMarkersTrack" style="position: absolute; inset: 0; pointer-events: none;"></div>
+          </div>
+
+          <div class="playback-controls">
+            <div class="btn-group">
+              <button class="btn btn-sm" onclick="App.step(-1)" title="Step Back (Previous Command)">⏮</button>
+              <button class="btn btn-sm" id="btnPlayRev" onclick="App.togglePlay(-1)" title="Play Reverse">◀</button>
+              <button class="btn btn-sm" id="btnPlayFwd" onclick="App.togglePlay(1)" title="Play Forward">▶</button>
+              <button class="btn btn-sm" onclick="App.step(1)" title="Step Forward (Next Command)">⏭</button>
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+              <span id="scrubberTimeDisplay" style="font-family: monospace; font-size: 0.82rem; color: var(--text-muted); font-weight: 600;">0:00 / 0:00</span>
+              <span style="display: inline-flex; align-items: center; gap: 3px; font-size: 0.72rem; color: var(--text-muted);" title="Tool change map pin">
+                <span style="display: inline-block; padding: 1px 4px; border-radius: 3px; background: #06b6d4; color: #fff; font-size: 0.65rem; font-weight: 700;">T#</span> Tool
+              </span>
+              <span style="display: inline-flex; align-items: center; gap: 3px; font-size: 0.72rem; color: var(--text-muted);" title="Machining operation / part boundary pin">
+                <span style="display: inline-block; padding: 1px 4px; border-radius: 3px; background: #3b82f6; color: #fff; font-size: 0.65rem; font-weight: 700;">P#</span> Part/Op
+              </span>
+            </div>
+
+            <!-- Playback Speed -->
+            <div class="btn-group">
+              <span style="font-size: 0.8rem; color: var(--text-muted); margin-right: 4px;">Speed:</span>
+              <select id="playbackSpeed" onchange="App.setPlaybackSpeed(this.value)" style="padding: 2px 6px; font-size: 0.8rem;">
+                <option value="0.5">0.5x</option>
+                <option value="1.0" selected>1.0x</option>
+                <option value="2.0">2.0x</option>
+                <option value="5.0">5.0x</option>
+                <option value="10.0">10x</option>
+                <option value="50.0">50x</option>
+              </select>
+            </div>
+
+            <!-- Visual Pause Insertion -->
+            <button class="btn btn-sm btn-warning" onclick="App.openInsertPauseDialog()">
+              ⏸ Insert Pause
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <!-- Right Pane: 3D WebGL Toolpath Viewport + Interactive Scrubber -->
-    <div id="paneRight" class="pane pane-right">
-      <!-- 3D Canvas -->
-      <canvas id="glCanvas"></canvas>
-
-      <!-- Viewport Angle Overlays -->
-      <div class="viewport-overlay">
-        <button class="btn btn-sm" onclick="GcodeViewer.setView('iso')">Isometric</button>
-        <button class="btn btn-sm" onclick="GcodeViewer.setView('top')">Top (XY)</button>
-        <button class="btn btn-sm" onclick="GcodeViewer.setView('front')">Front (XZ)</button>
-        <button class="btn btn-sm" onclick="GcodeViewer.resetCamera()">Reset</button>
+    <!-- Right Pane: G-code Text Editor Pane (Sequence Override) -->
+    <div id="paneEditor" class="pane pane-editor">
+      <div class="pane-collapse-strip" onclick="App.togglePaneCollapse('paneEditor')" title="Click to expand G-code text editor">
+        📝 G-CODE EDITOR (EXPAND)
       </div>
 
-      <!-- Telemetry HUD -->
-      <div class="telemetry-hud">
-        <div class="telemetry-row"><span>Line:</span><span id="hudLine" class="telemetry-val">0</span></div>
-        <div class="telemetry-row"><span>Command:</span><span id="hudCmd" class="telemetry-val">G0</span></div>
-        <div class="telemetry-row"><span>Position:</span><span id="hudPos" class="telemetry-val">X 0.0 Y 0.0 Z 0.0</span></div>
-        <div class="telemetry-row"><span>Feed:</span><span id="hudFeed" class="telemetry-val">0 mm/min</span></div>
-        <div class="telemetry-row"><span>Tool:</span><span id="hudTool" class="telemetry-val">T1</span></div>
-      </div>
-
-      <!-- Scrubber Panel -->
-      <div class="scrubber-panel">
-        <div class="scrubber-slider-wrap">
-          <input type="range" id="scrubberSlider" class="scrubber-slider" min="0" max="100" value="0" oninput="App.onScrub(this.value)">
-          <div id="pauseMarkersTrack" style="position: absolute; inset: 0; pointer-events: none;"></div>
+      <div class="pane-body" style="display: flex; flex-direction: column; height: 100%; padding: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <div>
+            <span class="section-title" style="margin-bottom: 2px;">G-code Text Editor</span>
+            <div id="editorTargetLabel" style="font-size: 0.78rem; color: var(--accent); font-weight: 600;">No slot selected</div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-success" onclick="App.applyEditorGcode()" title="Apply edits to this sequence run and update 3D preview">✓ Apply</button>
+            <button class="btn btn-sm" onclick="App.revertEditorGcode()" title="Revert to original file content">↺ Revert</button>
+            <button id="btnCollapse_paneEditor" class="btn btn-sm btn-collapse" onclick="App.togglePaneCollapse('paneEditor')" title="Collapse G-code editor pane">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: text-top;">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <line x1="15" y1="3" x2="15" y2="21"/>
+                <path d="M10 9l3 3-3 3"/>
+              </svg>
+              Collapse
+            </button>
+          </div>
         </div>
 
-        <div class="playback-controls">
-          <div class="btn-group">
-            <button class="btn btn-sm" onclick="App.step(-1)" title="Step Back">⏮</button>
-            <button class="btn btn-sm" id="btnPlayRev" onclick="App.togglePlay(-1)" title="Play Reverse">◀</button>
-            <button class="btn btn-sm" id="btnPlayFwd" onclick="App.togglePlay(1)" title="Play Forward">▶</button>
-            <button class="btn btn-sm" onclick="App.step(1)" title="Step Forward">⏭</button>
-          </div>
-
-          <!-- Playback Speed -->
-          <div class="btn-group">
-            <span style="font-size: 0.8rem; color: var(--text-muted); margin-right: 4px;">Speed:</span>
-            <select id="playbackSpeed" onchange="App.setPlaybackSpeed(this.value)" style="padding: 2px 6px; font-size: 0.8rem;">
-              <option value="0.5">0.5x</option>
-              <option value="1.0" selected>1.0x</option>
-              <option value="2.0">2.0x</option>
-              <option value="5.0">5.0x</option>
-              <option value="10.0">10x</option>
-              <option value="50.0">50x</option>
-            </select>
-          </div>
-
-          <!-- Visual Pause Insertion -->
-          <button class="btn btn-sm btn-warning" onclick="App.openInsertPauseDialog()">
-            ⏸ Insert Pause at Current Line
-          </button>
+        <div style="font-size: 0.73rem; color: var(--warning); background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); border-radius: 6px; padding: 6px 10px; margin-bottom: 8px;">
+          ⚠ <strong>Sequence Override:</strong> Edits apply only to this fixture run. Source files on disk will never be modified.
         </div>
+
+        <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 4px;">
+          <span id="editorStats">Lines: 0 | Size: 0 KB</span>
+          <span id="editorStatusBadge" class="badge" style="background: rgba(148, 163, 184, 0.15); color: var(--text-muted); padding: 1px 6px;">Original</span>
+        </div>
+
+        <textarea id="gcodeEditor" spellcheck="false"
+                  placeholder="Select a fixture slot or job to view and edit its G-code..."
+                  oninput="App.onEditorInput()"
+                  style="flex: 1; min-height: 200px; width: 100%; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: 0.82rem; background: var(--bg-dark); color: #38bdf8; border: 1px solid var(--border); border-radius: 6px; padding: 10px; resize: none; line-height: 1.45; outline: none; white-space: pre;"></textarea>
       </div>
     </div>
   </main>
@@ -412,6 +671,54 @@
       <div style="display: flex; justify-content: flex-end; gap: 8px;">
         <button class="btn" onclick="App.closeSettings()">Cancel</button>
         <button class="btn btn-primary" onclick="App.saveSettings()">Save Configuration</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sync Diagnostics & Logs Modal -->
+  <div id="syncDiagModal" class="modal-backdrop">
+    <div class="modal-dialog" style="max-width: 680px; width: 92%;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+        <h3 style="font-size: 1.15rem; margin: 0; display: flex; align-items: center; gap: 8px;">
+          📡 Controller Sync Diagnostics & Logs
+        </h3>
+        <button class="btn btn-sm" onclick="App.closeSyncDiagModal()" style="padding: 2px 8px;">✕</button>
+      </div>
+
+      <!-- Quick connection probe bar -->
+      <div class="card" style="padding: 10px 14px; margin-bottom: 12px; background: var(--bg-dark);">
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+          <div>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">TARGET CONTROLLER:</div>
+            <div style="font-size: 0.9rem; font-family: monospace; font-weight: 700; color: var(--accent);">
+              ws://<span id="diagTargetHost">192.168.1.150</span>:<span id="diagTargetPort">8080</span>
+            </div>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span id="diagPingResult" style="font-size: 0.8rem; font-family: monospace; color: var(--text-muted);"></span>
+            <button class="btn btn-sm btn-primary" onclick="App.testControllerConnectionDetailed()">⚡ Test Connection</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Detailed live log viewer -->
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+        <span style="font-size: 0.78rem; font-weight: 700; color: var(--text-muted);">TRANSACTION LOG & RECENT ERRORS:</span>
+        <button class="btn btn-sm" onclick="App.loadSyncLogs()" style="padding: 1px 6px; font-size: 0.7rem;">🔄 Refresh Logs</button>
+      </div>
+
+      <div id="syncLogTerminal" style="background: #090d16; border: 1px solid var(--border); border-radius: 6px; padding: 12px; height: 260px; overflow-y: auto; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.78rem; line-height: 1.5; color: #38bdf8; white-space: pre-wrap; margin-bottom: 16px;">
+        Loading sync transaction logs...
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="font-size: 0.75rem; color: var(--text-muted);">
+          Tip: Verify machine power & IP address if connections time out.
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-sm btn-success" onclick="App.syncNow()" id="btnDiagRetry">⚡ Retry Sync</button>
+          <button class="btn btn-sm" onclick="App.closeSyncDiagModal()">Close</button>
+        </div>
       </div>
     </div>
   </div>

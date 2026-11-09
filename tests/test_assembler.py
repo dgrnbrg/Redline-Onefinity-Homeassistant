@@ -151,6 +151,60 @@ class TestAssembler(unittest.TestCase):
         # M8 should be suppressed
         self.assertNotIn("M8\n", content)
 
+    def test_single_part_no_wcs_assembly(self):
+        slots = [
+            FixtureSlotConfig(slot_id="s1", job=self.job_a, wcs="none"),
+        ]
+
+        # Verify backward compatibility with single_part_no_wcs strategy string
+        output = assemble_workflow(
+            slots=slots,
+            strategy="single_part_no_wcs",
+            timestamp_str="20261108_1200",
+        )
+
+        content = output.files[output.primary_filename]
+        self.assertNotIn("G54           ; Switch to fixture coordinate system", content)
+        self.assertIn("Original WCS", content)
+
+        # Verify single_part=True parameter with standard part_by_part strategy
+        output2 = assemble_workflow(
+            slots=slots,
+            strategy="part_by_part",
+            single_part=True,
+            timestamp_str="20261108_1200",
+        )
+        content2 = output2.files[output2.primary_filename]
+        self.assertNotIn("G54           ; Switch to fixture coordinate system", content2)
+        self.assertIn("Original WCS", content2)
+        self.assertIn("Single Part: ACTIVE", content2)
+
+    def test_custom_gcode_override_assembly(self):
+        edited_code = """(Edited Bracket)
+T1 M6
+G0 X99.0 Y99.0 Z5.0
+G1 Z-15.0 F1000
+M30
+"""
+        slots = [
+            FixtureSlotConfig(
+                slot_id="s1",
+                job=self.job_a,
+                wcs="G54",
+                custom_gcode=edited_code,
+            ),
+        ]
+
+        output = assemble_workflow(
+            slots=slots,
+            strategy="part_by_part",
+            timestamp_str="20261108_1200",
+        )
+
+        content = output.files[output.primary_filename]
+        self.assertIn("X99", content)
+        self.assertIn("Z-15", content)
+
 
 if __name__ == "__main__":
     unittest.main()

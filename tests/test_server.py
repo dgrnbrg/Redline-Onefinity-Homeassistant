@@ -68,8 +68,9 @@ class TestServerEndpoints(unittest.TestCase):
     def _execute_http(self, method: str, path: str, body: dict | None = None) -> tuple[int, dict | str]:
         body_bytes = json.dumps(body).encode("utf-8") if body is not None else b""
         req_lines = [
-            f"{method} {path} HTTP/1.1",
+            f"{method} {path} HTTP/1.0",
             "Host: localhost",
+            "Connection: close",
             f"Content-Length: {len(body_bytes)}",
             "Content-Type: application/json",
             "",
@@ -115,6 +116,9 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertTrue(len(res["jobs"]) >= 1)
         bracket = next(j for j in res["jobs"] if j["name"] == "Bracket")
         self.assertEqual(bracket["tools_used"], [1])
+        self.assertIn("stale_ttl_hours", res)
+        self.assertIn("mtime", bracket)
+        self.assertGreater(bracket["mtime"], 0)
 
     def test_get_job_detail_geometry(self):
         status, res = self._execute_http("GET", "/api/job/job_bracket")
@@ -154,6 +158,162 @@ class TestServerEndpoints(unittest.TestCase):
         content = res["files"][primary]
         self.assertIn("G54           ; Switch to fixture coordinate system", content)
         self.assertIn("M0 (MSG, Inspect fixture)", content)
+
+
+    def test_staged_jobs_recursive_scan(self):
+        nested_dir = os.path.join(self.watched, "subfolder", "project_x")
+        os.makedirs(nested_dir, exist_ok=True)
+        nested_file = os.path.join(nested_dir, "Widget.ngc")
+        with open(nested_file, "w") as f:
+            f.write(SAMPLE_NGC)
+
+        try:
+            status, res = self._execute_http("GET", "/api/staged")
+            self.assertEqual(status, 200)
+            job_names = [j["name"] for j in res["jobs"]]
+            self.assertIn("Widget", job_names)
+        finally:
+            if os.path.exists(nested_file):
+                os.remove(nested_file)
+            try:
+                os.removedirs(nested_dir)
+            except OSError:
+                pass
+
+    def test_get_job_gcode(self):
+        status, res = self._execute_http("GET", "/api/job/job_bracket/gcode")
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["job_id"], "job_bracket")
+        self.assertIn("gcode", res)
+        self.assertIn("T1 M6", res["gcode"])
+
+    def test_parse_gcode_endpoint(self):
+        sample_code = """(Fusion 360)
+G20
+T2 M6
+G0 X1.0 Y1.0 Z0.5
+G1 Z-0.1 F20.0
+G1 X2.0 Y1.0
+G0 Z0.5
+M30
+"""
+        status, res = self._execute_http("POST", "/api/parse_gcode", body={"gcode": sample_code})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["units"], "imperial")
+        self.assertEqual(res["unit_suffix"], "in")
+        self.assertEqual(res["tools_used"], [2])
+        self.assertGreater(len(res["geometry"]), 0)
+        self.assertGreater(len(res["operations"]), 0)
+
+
+    def test_sync_logs_endpoint(self):
+        status, res = self._execute_http("GET", "/api/sync/logs")
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertIn("history", res)
+        self.assertIn("host", res)
+
+    def test_controller_test_endpoint(self):
+        def mock_test(*args, **kwargs):
+            return {"ok": True, "host": "127.0.0.1", "port": 8080, "latency_ms": 1.2, "error": None}
+
+        orig = self.context.controller_mgr.test_connection_detailed
+        self.context.controller_mgr.test_connection_detailed = mock_test
+        try:
+            status, res = self._execute_http("GET", "/api/controller/test")
+            self.assertEqual(status, 200)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["latency_ms"], 1.2)
+        finally:
+            self.context.controller_mgr.test_connection_detailed = orig
+
+    def test_sync_endpoint(self):
+        def mock_sync(*args, **kwargs):
+            files = kwargs.get("files") or (args[0] if args else {})
+            wf = kwargs.get("workflow_key") or (args[1] if len(args) > 1 else "WF_test")
+            return {
+                "ok": True,
+                "workflow_key": wf,
+                "uploaded": list(files.keys()),
+                "replaced_earlier": [],
+                "pruned_stale": [],
+                "logs": ["[12:00:00] Mock sync success"],
+                "duration_sec": 0.05,
+            }
+
+        orig = self.context.controller_mgr.execute_sync
+        self.context.controller_mgr.execute_sync = mock_sync
+        try:
+            payload = {
+                "slots": [
+                    {
+                        "slot_id": "slot_1",
+                        "job_id": "job_bracket",
+                        "wcs": "G54",
+                        "z_shift": 0.0,
+                        "is_air_carve": False,
+                    }
+                ],
+                "strategy": "part_by_part",
+            }
+            status, res = self._execute_http("POST", "/api/sync", body=payload)
+            self.assertEqual(status, 200)
+            self.assertTrue(res["ok"])
+            self.assertIn("bracket", res["uploaded"][0].lower())
+            self.assertTrue(len(self.context.sync_history) > 0)
+        finally:
+            self.context.controller_mgr.execute_sync = orig
+
+    def test_job_safe_z_override_endpoint(self):
+        status, res = self._execute_http("POST", "/api/job/job_bracket/safe_z", body={"safe_z": 3.5})
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["safe_z_threshold"], 3.5)
+        self.assertIn("operations", res)
+
+    def test_job_gcode_sliced_endpoint(self):
+        status, res = self._execute_http("GET", "/api/job/job_bracket/gcode?start=2&end=4")
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertIn("G0 X0 Y0 Z5.0", res["gcode"])
+
+    def test_assemble_multi_op_slots(self):
+        payload = {
+            "slots": [
+                {
+                    "slot_id": "slot_1",
+                    "job_id": "job_bracket",
+                    "op_index": 1,
+                    "op_name": "Roughing",
+                    "start_line": 1,
+                    "end_line": 5,
+                    "wcs": "G54",
+                    "z_shift": 0.0,
+                    "is_air_carve": False,
+                },
+                {
+                    "slot_id": "slot_2",
+                    "job_id": "job_bracket",
+                    "op_index": 2,
+                    "op_name": "Finishing",
+                    "start_line": 6,
+                    "end_line": 9,
+                    "wcs": "G55",
+                    "z_shift": 0.0,
+                    "is_air_carve": False,
+                },
+            ],
+            "strategy": "part_by_part",
+        }
+        status, res = self._execute_http("POST", "/api/assemble", body=payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        primary = res["primary_filename"]
+        content = res["files"][primary]
+        self.assertIn("G54           ; Switch to fixture coordinate system", content)
+        self.assertIn("G55           ; Switch to fixture coordinate system", content)
 
 
 if __name__ == "__main__":

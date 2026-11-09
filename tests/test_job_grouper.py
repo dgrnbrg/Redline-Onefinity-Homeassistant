@@ -61,10 +61,33 @@ class TestJobGrouper(unittest.TestCase):
             self.assertTrue(bracket_job.is_multi_file)
             self.assertEqual(len(bracket_job.subfiles), 2)
             self.assertEqual(bracket_job.tools_used, [1, 2])
+            self.assertGreater(bracket_job.mtime, 0)
+            self.assertGreater(bracket_job.subfiles[0].mtime, 0)
+            self.assertGreater(bracket_job.to_summary_dict()['mtime'], 0)
 
             # Plate should be a single-file job
             self.assertFalse(plate_job.is_multi_file)
             self.assertEqual(len(plate_job.subfiles), 1)
+
+
+    def test_job_natural_sorting_and_caching(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_10 = os.path.join(tmpdir, "Part_10.ngc")
+            file_2 = os.path.join(tmpdir, "Part_2.ngc")
+            file_1 = os.path.join(tmpdir, "Part_1.ngc")
+
+            for path in (file_10, file_2, file_1):
+                with open(path, "w") as f:
+                    f.write(OTHER_JOB_GCODE)
+
+            # 1. Natural sorting: Part_1, Part_2, Part_10
+            jobs = group_files_into_logical_jobs([file_10, file_2, file_1])
+            names = [j.name for j in jobs]
+            self.assertEqual(names, ["Part_1", "Part_2", "Part_10"])
+
+            # 2. Caching: re-parsing should return identical results rapidly
+            jobs_cached = group_files_into_logical_jobs([file_10, file_2, file_1])
+            self.assertEqual([j.name for j in jobs_cached], ["Part_1", "Part_2", "Part_10"])
 
 
 if __name__ == "__main__":

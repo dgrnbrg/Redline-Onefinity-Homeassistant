@@ -29,9 +29,11 @@ class SimpleWebSocketClient:
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.connected = False
+        self.last_error: str | None = None
 
     async def connect(self) -> bool:
         """Perform HTTP Upgrade handshake to establish WebSocket connection."""
+        self.last_error = None
         try:
             self.reader, self.writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port),
@@ -63,14 +65,36 @@ class SimpleWebSocketClient:
                 header_data += chunk
 
             if b"101 Switching Protocols" not in header_data:
-                _LOGGER.debug("Handshake failed: %s", header_data.decode("utf-8", "ignore"))
+                self.last_error = f"Handshake rejected: {header_data.decode('utf-8', 'ignore').strip() or 'No 101 status'}"
+                _LOGGER.warning(self.last_error)
                 await self.close()
                 return False
 
             self.connected = True
             return True
+        except asyncio.TimeoutError:
+            self.last_error = f"Connection to {self.host}:{self.port} timed out after {self.timeout}s"
+            _LOGGER.warning(self.last_error)
+            await self.close()
+            return False
+        except ConnectionRefusedError:
+            self.last_error = f"Connection to {self.host}:{self.port} refused (controller service offline or port blocked)"
+            _LOGGER.warning(self.last_error)
+            await self.close()
+            return False
+        except socket.gaierror as err:
+            self.last_error = f"Hostname '{self.host}' could not be resolved: {err}"
+            _LOGGER.warning(self.last_error)
+            await self.close()
+            return False
+        except OSError as err:
+            self.last_error = f"Network OS error connecting to {self.host}:{self.port}: {err}"
+            _LOGGER.warning(self.last_error)
+            await self.close()
+            return False
         except Exception as err:
-            _LOGGER.debug("Failed to connect to %s:%s: %s", self.host, self.port, err)
+            self.last_error = f"Failed to connect to {self.host}:{self.port}: {err}"
+            _LOGGER.warning(self.last_error)
             await self.close()
             return False
 
@@ -179,6 +203,184 @@ class ControllerWorkflowManager:
         ok = await client.connect()
         await client.close()
         return ok
+
+    async def test_connection_detailed(self) -> dict[str, Any]:
+        """Test connection and return latency and error details."""
+        client = SimpleWebSocketClient(self.host, self.port, timeout=2.5)
+        t0 = time.perf_counter()
+        ok = await client.connect()
+        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
+        err = client.last_error if not ok else None
+        await client.close()
+        return {
+            "ok": ok,
+            "host": self.host,
+            "port": self.port,
+            "latency_ms": latency_ms if ok else None,
+            "error": err,
+        }
+
+    async def execute_sync(
+        self,
+        files: dict[str, str],
+        workflow_key: str,
+        ttl_hours: float = 24.0,
+        subfolder: str = "gcode/workflow",
+    ) -> dict[str, Any]:
+        """Execute a complete, atomic sync transaction on a SINGLE WebSocket connection."""
+        logs: list[str] = []
+
+        def log(msg: str) -> None:
+            ts = datetime.datetime.now().strftime("%H:%M:%S")
+            entry = f"[{ts}] {msg}"
+            logs.append(entry)
+            _LOGGER.info(entry)
+
+        log(f"Initiating sync to controller at ws://{self.host}:{self.port} (target: {subfolder})")
+        client = SimpleWebSocketClient(self.host, self.port, timeout=3.5)
+
+        t_start = time.perf_counter()
+        if not await client.connect():
+            err_msg = client.last_error or f"Could not connect to controller at {self.host}:{self.port}"
+            log(f"Connection failed: {err_msg}")
+            return {
+                "ok": False,
+                "workflow_key": workflow_key,
+                "uploaded": [],
+                "replaced_earlier": [],
+                "pruned_stale": [],
+                "error": err_msg,
+                "logs": logs,
+                "duration_sec": round(time.perf_counter() - t_start, 2),
+            }
+
+        uploaded: list[str] = []
+        replaced: list[str] = []
+        pruned: list[str] = []
+
+        try:
+            log(f"Connected to controller WebSocket at {self.host}:{self.port}")
+
+            # 1. Ensure target folder exists
+            log(f"Ensuring destination folder '{subfolder}' exists...")
+            await client.send_json({"command": "createFolder", "folderPath": subfolder})
+            await asyncio.sleep(0.05)
+
+            # 2. Query file list once
+            log("Querying file list from controller...")
+            await client.send_json({"command": "refreshFileList"})
+            existing_files: list[dict[str, Any]] = []
+            for _ in range(5):
+                msg = await client.read_json(timeout=1.5)
+                if not msg:
+                    break
+                if msg.get("name") == "gcode" and "children" in msg:
+                    sub_name = subfolder.split("/")[-1] if "/" in subfolder else subfolder
+                    for ch in msg.get("children", []):
+                        if ch.get("name") == sub_name and "children" in ch:
+                            existing_files = ch.get("children", [])
+                            break
+                    break
+
+            log(f"Found {len(existing_files)} existing file(s) in '{subfolder}'")
+
+            # 3. Prune stale files (TTL)
+            if ttl_hours > 0:
+                now = datetime.datetime.now()
+                for f in existing_files:
+                    fname = f.get("name", "")
+                    mod_str = f.get("modified", "")
+                    if fname and mod_str:
+                        try:
+                            mod_time = datetime.datetime.strptime(mod_str, "%Y-%m-%d %H:%M:%S")
+                            age_hrs = (now - mod_time).total_seconds() / 3600.0
+                            if age_hrs > ttl_hours:
+                                log(f"Pruning stale file: {fname} (age: {age_hrs:.1f}h > {ttl_hours}h)")
+                                await client.send_json({"command": "deleteFile", "filePath": f"{subfolder}/{fname}"})
+                                pruned.append(fname)
+                                await asyncio.sleep(0.02)
+                        except Exception:
+                            pass
+
+            # 4. Delete earlier versions of this workflow
+            if workflow_key:
+                prefix = f"{workflow_key}_"
+                for f in existing_files:
+                    fname = f.get("name", "")
+                    if fname and (fname.startswith(prefix) or fname == f"{workflow_key}.ngc"):
+                        log(f"Replacing earlier version: {fname}")
+                        await client.send_json({"command": "deleteFile", "filePath": f"{subfolder}/{fname}"})
+                        replaced.append(fname)
+                        await asyncio.sleep(0.02)
+
+            # 5. Upload newly generated file(s)
+            for fname, content in files.items():
+                dest_path = f"{subfolder}/{fname}"
+                raw_bytes = content.encode("utf-8")
+                total_size = len(raw_bytes)
+                checksum = hashlib.md5(raw_bytes).hexdigest()
+                log(f"Uploading '{fname}' ({total_size} bytes, {total_size // CHUNK_SIZE + 1} chunks)...")
+
+                await client.send_json(
+                    {
+                        "command": "startUpload",
+                        "fileName": dest_path,
+                        "totalSize": total_size,
+                        "checksum": checksum,
+                    }
+                )
+                await asyncio.sleep(0.05)
+
+                offset = 0
+                while offset < total_size:
+                    chunk = raw_bytes[offset : offset + CHUNK_SIZE]
+                    chunk_b64 = base64.b64encode(chunk).decode("ascii")
+                    await client.send_json(
+                        {
+                            "command": "uploadChunk",
+                            "fileName": dest_path,
+                            "chunkData": chunk_b64,
+                            "offset": offset,
+                        }
+                    )
+                    offset += len(chunk)
+                    await asyncio.sleep(0.002)
+
+                await client.send_json(
+                    {
+                        "command": "finishUpload",
+                        "filePath": dest_path,
+                    }
+                )
+                await asyncio.sleep(0.05)
+                uploaded.append(fname)
+                log(f"Successfully uploaded '{fname}'")
+
+            log(f"Sync complete: {len(uploaded)} file(s) uploaded in {time.perf_counter() - t_start:.2f}s")
+            return {
+                "ok": len(uploaded) > 0,
+                "workflow_key": workflow_key,
+                "uploaded": uploaded,
+                "replaced_earlier": replaced,
+                "pruned_stale": pruned,
+                "logs": logs,
+                "duration_sec": round(time.perf_counter() - t_start, 2),
+            }
+        except Exception as err:
+            err_str = f"Sync interrupted by error: {err}"
+            log(err_str)
+            return {
+                "ok": False,
+                "workflow_key": workflow_key,
+                "uploaded": uploaded,
+                "replaced_earlier": replaced,
+                "pruned_stale": pruned,
+                "error": err_str,
+                "logs": logs,
+                "duration_sec": round(time.perf_counter() - t_start, 2),
+            }
+        finally:
+            await client.close()
 
     async def ensure_folder(self, folder_path: str = "gcode/workflow") -> bool:
         """Create folder on controller if it does not already exist."""

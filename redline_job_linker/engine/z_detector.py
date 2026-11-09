@@ -44,9 +44,15 @@ def detect_z_origin(
     min_z = job.min_cutting_z
     max_z = job.max_cutting_z
     total_cuts = job.total_cutting_moves
+    unit_label = "in" if job.units == "imperial" else "mm"
+    spoilboard_limit = (
+        spoilboard_max_cut_depth_mm / 25.4
+        if job.units == "imperial"
+        else spoilboard_max_cut_depth_mm
+    )
 
     # Spoilboard limit check
-    spoilboard_exceeded = min_z < -abs(spoilboard_max_cut_depth_mm)
+    spoilboard_exceeded = min_z < -abs(spoilboard_limit)
 
     # 1. Comment inspection
     if _VECTRIC_BED_RE.search(all_comments) or _FUSION_BED_RE.search(all_comments):
@@ -56,12 +62,12 @@ def detect_z_origin(
                 label="Unknown / Review Required",
                 confidence=0.5,
                 rationale=(
-                    f"CAM header says Machine Bed, but cutting plunges to Z={min_z:.3f} mm, "
-                    f"exceeding max spoilboard cut-through limit ({spoilboard_max_cut_depth_mm:.3f} mm)."
+                    f"CAM header says Machine Bed, but cutting plunges to Z={min_z:.3f} {unit_label}, "
+                    f"exceeding max spoilboard cut-through limit ({spoilboard_limit:.3f} {unit_label})."
                 ),
                 min_cutting_z=min_z,
                 max_cutting_z=max_z,
-                spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+                spoilboard_limit_mm=spoilboard_limit,
                 spoilboard_exceeded=True,
             )
         return ZOriginAnalysis(
@@ -71,7 +77,7 @@ def detect_z_origin(
             rationale="Detected explicit 'Z Zero: Machine Bed' or 'Stock Z min: 0' in CAM header.",
             min_cutting_z=min_z,
             max_cutting_z=max_z,
-            spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+            spoilboard_limit_mm=spoilboard_limit,
             spoilboard_exceeded=False,
         )
 
@@ -83,7 +89,7 @@ def detect_z_origin(
             rationale="Detected explicit 'Z Zero: Top of Material' or 'Stock Z max: 0' in CAM header.",
             min_cutting_z=min_z,
             max_cutting_z=max_z,
-            spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+            spoilboard_limit_mm=spoilboard_limit,
             spoilboard_exceeded=False,
         )
 
@@ -96,7 +102,7 @@ def detect_z_origin(
             rationale="No G1/G2/G3 cutting motion found in file.",
             min_cutting_z=min_z,
             max_cutting_z=max_z,
-            spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+            spoilboard_limit_mm=spoilboard_limit,
             spoilboard_exceeded=False,
         )
 
@@ -110,12 +116,12 @@ def detect_z_origin(
             label="Top of Part (Stock Top)",
             confidence=round(0.85 + (neg_ratio * 0.1), 2),
             rationale=(
-                f"{neg_ratio * 100:.1f}% of cutting moves are Z <= 0 (min Z: {min_z:.3f} mm, "
-                f"max Z: {max_z:.3f} mm). Typical of part-top zeroing."
+                f"{neg_ratio * 100:.1f}% of cutting moves are Z <= 0 (min Z: {min_z:.3f} {unit_label}, "
+                f"max Z: {max_z:.3f} {unit_label}). Typical of part-top zeroing."
             ),
             min_cutting_z=min_z,
             max_cutting_z=max_z,
-            spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+            spoilboard_limit_mm=spoilboard_limit,
             spoilboard_exceeded=False,
         )
 
@@ -128,11 +134,11 @@ def detect_z_origin(
                 confidence=0.4,
                 rationale=(
                     f"Mostly positive cutting passes ({pos_ratio * 100:.1f}%), but deepest cut "
-                    f"is Z={min_z:.3f} mm, exceeding spoilboard threshold of -{spoilboard_max_cut_depth_mm:.3f} mm."
+                    f"is Z={min_z:.3f} {unit_label}, exceeding spoilboard threshold of -{spoilboard_limit:.3f} {unit_label}."
                 ),
                 min_cutting_z=min_z,
                 max_cutting_z=max_z,
-                spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+                spoilboard_limit_mm=spoilboard_limit,
                 spoilboard_exceeded=True,
             )
         return ZOriginAnalysis(
@@ -140,12 +146,12 @@ def detect_z_origin(
             label="Machine Bed (Stock Bottom)",
             confidence=round(0.80 + (pos_ratio * 0.15), 2),
             rationale=(
-                f"{pos_ratio * 100:.1f}% of cutting moves are Z > 0, terminating at Z={min_z:.3f} mm "
-                f"(within allowable spoilboard clearance -{spoilboard_max_cut_depth_mm:.3f} mm)."
+                f"{pos_ratio * 100:.1f}% of cutting moves are Z > 0, terminating at Z={min_z:.3f} {unit_label} "
+                f"(within allowable spoilboard clearance -{spoilboard_limit:.3f} {unit_label})."
             ),
             min_cutting_z=min_z,
             max_cutting_z=max_z,
-            spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
+            spoilboard_limit_mm=spoilboard_limit,
             spoilboard_exceeded=False,
         )
 
@@ -155,12 +161,12 @@ def detect_z_origin(
         confidence=0.3,
         rationale=(
             f"Mixed cutting depths (neg: {neg_ratio * 100:.1f}%, pos: {pos_ratio * 100:.1f}%, "
-            f"min Z: {min_z:.3f} mm, max Z: {max_z:.3f} mm). Please select manually."
+            f"min Z: {min_z:.3f} {unit_label}, max Z: {max_z:.3f} {unit_label}). Please select manually."
         ),
         min_cutting_z=min_z,
         max_cutting_z=max_z,
-        spoilboard_limit_mm=spoilboard_max_cut_depth_mm,
-        spoilboard_exceeded=spoilboard_exceeded,
+        spoilboard_limit_mm=spoilboard_limit,
+        spoilboard_exceeded=False,
     )
 
 

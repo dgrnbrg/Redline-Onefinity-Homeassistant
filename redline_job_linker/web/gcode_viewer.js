@@ -7,6 +7,9 @@ const GcodeViewer = (() => {
   let canvas, gl;
   let points = [];
   let lineBuffer = null;
+  let rawVertices = null;
+  let currentSafeZ = 0.0;
+  let currentExtents = { minX: 0, maxX: 100, minY: 0, maxY: 100, minZ: -5, maxZ: 5 };
   let toolheadBuffer = null;
   let shaderProgram = null;
 
@@ -120,9 +123,12 @@ const GcodeViewer = (() => {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(coneVerts), gl.STATIC_DRAW);
   }
 
-  function loadGeometry(pointList) {
+  function loadGeometry(pointList, safeZThreshold) {
     points = pointList || [];
     cursorIndex = 0;
+    if (typeof safeZThreshold === 'number') {
+      currentSafeZ = safeZThreshold;
+    }
     if (points.length === 0) return;
 
     // Build vertex array with color attributes
@@ -133,15 +139,26 @@ const GcodeViewer = (() => {
 
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
-      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-      minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+      if (typeof p.x === 'number' && isFinite(p.x)) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      }
+      if (typeof p.y === 'number' && isFinite(p.y)) {
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+      }
+      if (typeof p.z === 'number' && isFinite(p.z)) {
+        minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+      }
 
       if (i > 0) {
         const prev = points[i - 1];
         let r = 0.05, g = 0.65, b = 0.95; // Blue-cyan for standard linear cutting G1
         if (p.type === 'rapid') {
-          r = 0.95; g = 0.25; b = 0.25; // Red for rapid travel G0
+          const isOpChange = Math.max(prev.z || 0, p.z || 0) >= currentSafeZ;
+          if (isOpChange) {
+            r = 0.98; g = 0.75; b = 0.14; // Amber/gold for op change safe Z retracts
+          } else {
+            r = 0.95; g = 0.25; b = 0.25; // Red for intra-op stepover rapids
+          }
         } else if (p.type === 'arc') {
           r = 0.1; g = 0.85; b = 0.35; // Green for arcs G2/G3
         }
@@ -151,25 +168,73 @@ const GcodeViewer = (() => {
       }
     }
 
-    // Grid floor for visual bed context
-    const spanX = Math.max(50, maxX - minX);
-    const spanY = Math.max(50, maxY - minY);
-    modelSize = Math.max(spanX, spanY, Math.max(20, maxZ - minZ));
-    modelCenter = [(minX + maxX) / 2 || 0, (minY + maxY) / 2 || 0, (minZ + maxZ) / 2 || 0];
+    if (!isFinite(minX)) { minX = 0; maxX = 100; }
+    if (!isFinite(minY)) { minY = 0; maxY = 100; }
+    if (!isFinite(minZ)) { minZ = -5; maxZ = 5; }
 
+    currentExtents = { minX, maxX, minY, maxY, minZ, maxZ };
+
+    const spanX = Math.max(20, maxX - minX);
+    const spanY = Math.max(20, maxY - minY);
+    const spanZ = Math.max(10, maxZ - minZ);
+    modelSize = Math.max(spanX, spanY, spanZ);
+    modelCenter = [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+
+    rawVertices = new Float32Array(verts);
     lineBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, rawVertices, gl.STATIC_DRAW);
     lineBuffer.numVertices = verts.length / 6;
 
+    if (points.length > 0) {
+      cursorCoords = [points[0].x || 0, points[0].y || 0, points[0].z || 0];
+    }
     resetCamera();
   }
 
-  function setCursor(idx) {
+  function updateSafeZThreshold(newThreshold) {
+    if (typeof newThreshold === 'number') {
+      currentSafeZ = newThreshold;
+    }
+    if (!rawVertices || !gl || !lineBuffer || points.length <= 1) return;
+
+    for (let i = 1; i < points.length; i++) {
+      const p = points[i];
+      if (p.type === 'rapid') {
+        const prev = points[i - 1];
+        const isOpChange = Math.max(prev.z || 0, p.z || 0) >= currentSafeZ;
+        const r = isOpChange ? 0.98 : 0.95;
+        const g = isOpChange ? 0.75 : 0.25;
+        const b = isOpChange ? 0.14 : 0.25;
+
+        const baseIdx = (i - 1) * 12;
+        rawVertices[baseIdx + 3] = r;
+        rawVertices[baseIdx + 4] = g;
+        rawVertices[baseIdx + 5] = b;
+
+        rawVertices[baseIdx + 9] = r;
+        rawVertices[baseIdx + 10] = g;
+        rawVertices[baseIdx + 11] = b;
+      }
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, rawVertices, gl.STATIC_DRAW);
+  }
+
+  function getExtents() {
+    return { ...currentExtents, safeZ: currentSafeZ };
+  }
+
+  function setCursor(idx, customCoords) {
     if (!points || points.length === 0) return;
     cursorIndex = Math.max(0, Math.min(points.length - 1, Math.round(idx)));
-    const p = points[cursorIndex];
-    cursorCoords = [p.x, p.y, p.z];
+    if (customCoords && customCoords.length >= 3 && typeof customCoords[0] === 'number') {
+      cursorCoords = [customCoords[0], customCoords[1], customCoords[2]];
+    } else {
+      const p = points[cursorIndex];
+      cursorCoords = [p.x, p.y, p.z];
+    }
   }
 
   function resetCamera() {
@@ -205,6 +270,8 @@ const GcodeViewer = (() => {
   function render() {
     if (!gl || !shaderProgram) return;
 
+    resizeCanvas();
+
     gl.clearColor(0.05, 0.07, 0.12, 1.0); // Dark machine background
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
@@ -212,11 +279,11 @@ const GcodeViewer = (() => {
     const aspect = canvas.width / Math.max(1, canvas.height);
     const projMat = createPerspectiveMatrix(45, aspect, 1, 5000);
 
-    // View matrix
+    // View matrix: Center at origin -> rotate around Z -> tilt around X -> pan & back off in Z
     const dist = (modelSize * 1.8) / Math.max(0.1, zoom);
     let viewMat = createIdentityMatrix();
     viewMat = translateMatrix(viewMat, panX, panY, -dist);
-    viewMat = rotateXMatrix(viewMat, (rotX - 90) * Math.PI / 180);
+    viewMat = rotateXMatrix(viewMat, -rotX * Math.PI / 180);
     viewMat = rotateZMatrix(viewMat, rotZ * Math.PI / 180);
     viewMat = translateMatrix(viewMat, -modelCenter[0], -modelCenter[1], -modelCenter[2]);
 
@@ -239,7 +306,7 @@ const GcodeViewer = (() => {
     if (toolheadBuffer && points.length > 0) {
       let toolMvp = createIdentityMatrix();
       toolMvp = translateMatrix(toolMvp, panX, panY, -dist);
-      toolMvp = rotateXMatrix(toolMvp, (rotX - 90) * Math.PI / 180);
+      toolMvp = rotateXMatrix(toolMvp, -rotX * Math.PI / 180);
       toolMvp = rotateZMatrix(toolMvp, rotZ * Math.PI / 180);
       toolMvp = translateMatrix(
         toolMvp,
@@ -370,21 +437,21 @@ const GcodeViewer = (() => {
   function translateMatrix(m, tx, ty, tz) {
     const trans = createIdentityMatrix();
     trans[12] = tx; trans[13] = ty; trans[14] = tz;
-    return multiplyMatrices(trans, m);
+    return multiplyMatrices(m, trans);
   }
 
   function rotateXMatrix(m, rad) {
     const rot = createIdentityMatrix();
     const c = Math.cos(rad), s = Math.sin(rad);
     rot[5] = c; rot[6] = s; rot[9] = -s; rot[10] = c;
-    return multiplyMatrices(rot, m);
+    return multiplyMatrices(m, rot);
   }
 
   function rotateZMatrix(m, rad) {
     const rot = createIdentityMatrix();
     const c = Math.cos(rad), s = Math.sin(rad);
     rot[0] = c; rot[1] = s; rot[4] = -s; rot[5] = c;
-    return multiplyMatrices(rot, m);
+    return multiplyMatrices(m, rot);
   }
 
   return {
@@ -393,5 +460,8 @@ const GcodeViewer = (() => {
     setCursor,
     resetCamera,
     setView,
+    updateSafeZThreshold,
+    getExtents,
+    resizeCanvas,
   };
 })();

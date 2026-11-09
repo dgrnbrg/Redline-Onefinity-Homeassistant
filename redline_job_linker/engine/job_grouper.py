@@ -30,6 +30,7 @@ class LogicalJobSubfile:
     operation_name: str
     tool_number: int
     parsed: ParsedJob
+    mtime: float = 0.0
 
 
 @dataclass
@@ -50,11 +51,15 @@ class LogicalJob:
     max_cutting_z: float
     z_origin: ZOriginAnalysis
     combined_parsed_job: ParsedJob
+    mtime: float = 0.0
 
     def to_summary_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "name": self.name,
+            "mtime": self.mtime,
+            "units": self.combined_parsed_job.units,
+            "unit_suffix": "in" if self.combined_parsed_job.units == "imperial" else "mm",
             "is_multi_file": self.is_multi_file,
             "subfiles_count": len(self.subfiles),
             "subfiles": [
@@ -64,10 +69,27 @@ class LogicalJob:
                     "op": sf.operation_name,
                     "tool": sf.tool_number,
                     "lines": sf.parsed.total_lines,
+                    "mtime": sf.mtime,
                 }
                 for sf in self.subfiles
             ],
+            "operations": [
+                {
+                    "op": op.op_number,
+                    "name": op.name,
+                    "tool": op.tool_number,
+                    "start_line": op.start_line,
+                    "end_line": op.end_line,
+                    "min_z": op.min_z,
+                    "max_z": op.max_z,
+                    "min_cutting_z": op.min_cutting_z,
+                    "max_cutting_z": op.max_cutting_z,
+                    "lines": op.total_lines,
+                }
+                for op in self.combined_parsed_job.operations
+            ],
             "tools_used": self.tools_used,
+            "safe_z_threshold": self.combined_parsed_job.safe_z_threshold,
             "total_lines": self.total_lines,
             "extents": {
                 "min_x": self.min_x,
@@ -113,20 +135,38 @@ def _extract_base_name_and_order(filename: str) -> tuple[str, int, str]:
     return stem, 1, stem
 
 
+
+def natural_sort_key(s: str) -> list[int | str]:
+    """Key for natural alphanumeric case-insensitive sorting (e.g. Job_2 before Job_10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", str(s))]
+
+
+_PARSED_FILE_CACHE: dict[tuple[str, int, float], ParsedJob] = {}
+
+
 def group_files_into_logical_jobs(
     file_paths: list[str],
     spoilboard_max_cut_depth_mm: float = 1.27,
 ) -> list[LogicalJob]:
     """Group file paths into LogicalJobs, detecting multi-file CAM exports."""
-    # Read and parse each file
+    # Read and parse each file with mtime/size caching for fast scans
     parsed_subfiles: list[tuple[str, str, ParsedJob, float]] = []  # (path, name, parsed, mtime)
     for p in file_paths:
         try:
-            with open(p, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read()
-            mtime = os.path.getmtime(p) if os.path.exists(p) else 0.0
+            stat = os.stat(p)
+            size = stat.st_size
+            mtime = stat.st_mtime
             name = os.path.basename(p)
-            parsed = parse_gcode(content, filename=name)
+            cache_key = (p, size, mtime)
+
+            if cache_key in _PARSED_FILE_CACHE:
+                parsed = _PARSED_FILE_CACHE[cache_key]
+            else:
+                with open(p, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                parsed = parse_gcode(content, filename=name)
+                _PARSED_FILE_CACHE[cache_key] = parsed
+
             parsed_subfiles.append((p, name, parsed, mtime))
         except Exception:
             continue
@@ -140,8 +180,8 @@ def group_files_into_logical_jobs(
     logical_jobs: list[LogicalJob] = []
 
     for base_lower, items in buckets.items():
-        # Sort items by sequence order, then by filename
-        items.sort(key=lambda it: (it[3], it[1]))
+        # Sort items by sequence order, then by filename (natural sort)
+        items.sort(key=lambda it: (it[3], natural_sort_key(it[1])))
 
         is_multi = len(items) > 1
         base_name = Path(items[0][1]).stem if not is_multi else _extract_base_name_and_order(items[0][1])[0]
@@ -173,6 +213,7 @@ def group_files_into_logical_jobs(
                     operation_name=op,
                     tool_number=tool_num,
                     parsed=parsed,
+                    mtime=mtime,
                 )
             )
             all_tools.update(parsed.tools_used)
@@ -240,7 +281,8 @@ def group_files_into_logical_jobs(
                 max_cutting_z=combined_job.max_cutting_z,
                 z_origin=z_analysis,
                 combined_parsed_job=combined_job,
+                mtime=max((it[5] for it in items), default=0.0),
             )
         )
 
-    return sorted(logical_jobs, key=lambda j: j.name.lower())
+    return sorted(logical_jobs, key=lambda j: natural_sort_key(j.name))

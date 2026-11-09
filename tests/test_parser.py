@@ -79,6 +79,75 @@ class TestGcodeParser(unittest.TestCase):
         self.assertEqual(job.tool_sections[0].tool_number, 1)
         self.assertEqual(job.tool_sections[1].tool_number, 2)
 
+    def test_imperial_units_detection(self):
+        imperial_code = """(Vectric Aspire)
+( Units: Inches )
+G90 G20
+G0 Z1.0
+G1 Z-0.25 F30
+M30
+"""
+        job = parse_gcode(imperial_code)
+        self.assertEqual(job.units, "imperial")
+        self.assertAlmostEqual(job.min_cutting_z, -0.25)
+
+    def test_inferred_operations_delineation(self):
+        gcode = """
+( Roughing Pocket )
+G20
+G0 Z0.8
+G0 X0 Y0
+G1 Z-0.2 F30
+G1 X10.0
+G0 Z0.05
+G0 X10.1
+G1 Z-0.2
+( Safe Z Retract finishes op 1 )
+G0 Z0.8
+( Finishing Profile )
+G0 X20.0 Y20.0
+G1 Z-0.5 F40
+G1 X30.0
+G0 Z0.8
+( Tool Change to T2 )
+M6 T2
+G0 X0 Y0
+G1 Z-0.1 F20
+G1 X5.0
+G0 Z0.8
+M30
+"""
+        job = parse_gcode(gcode)
+        self.assertEqual(job.units, "imperial")
+        self.assertEqual(len(job.operations), 3)
+        self.assertEqual(job.operations[0].tool_number, 1)
+        self.assertEqual(job.operations[1].tool_number, 1)
+        self.assertEqual(job.operations[2].tool_number, 2)
+        self.assertAlmostEqual(job.operations[0].min_cutting_z, -0.2)
+        self.assertAlmostEqual(job.operations[1].min_cutting_z, -0.5)
+        self.assertAlmostEqual(job.operations[2].min_cutting_z, -0.1)
+
+    def test_safe_z_threshold_and_stepover_differentiation(self):
+        # Program with stepovers at Z=0.03 and safe retracts at Z=0.30
+        gcode = """G20
+G0 X0 Y0 Z0.3
+G1 Z-0.1 F20
+G1 X1.0
+G0 Z0.03
+G0 X1.05
+G1 Z-0.1
+G0 Z0.3
+G0 X5.0 Y5.0
+G1 Z-0.2
+G0 Z0.3
+M30
+"""
+        job = parse_gcode(gcode)
+        # Threshold should be between 0.03 and 0.30 (approx 0.165)
+        self.assertGreater(job.safe_z_threshold, 0.03)
+        self.assertLess(job.safe_z_threshold, 0.30)
+        self.assertEqual(len(job.operations), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
