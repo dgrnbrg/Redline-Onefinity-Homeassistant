@@ -496,13 +496,20 @@
           <datalist id="stagedAutocompleteList"></datalist>
         </div>
 
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-          <div style="display: flex; gap: 4px;">
-            <button id="btnFilter24h" class="btn btn-sm btn-primary" onclick="App.setStagedTimeFilter('24h')">⏱ Past 24h</button>
-            <button id="btnFilterAll" class="btn btn-sm" onclick="App.setStagedTimeFilter('all')">📁 All Files</button>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;">
+          <div style="display: flex; gap: 4px; align-items: center;">
+            <button id="btnFilter24h" class="btn btn-sm btn-primary" onclick="App.setStagedTimeFilter('24h')" title="Filter jobs from past 24 hours">⏱ Past 24h</button>
+            <button id="btnFilterAll" class="btn btn-sm" onclick="App.setStagedTimeFilter('all')" title="Show all staged jobs">📁 All Files</button>
           </div>
-          <span id="stagedActiveFilterNote" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <span style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600;">Sort:</span>
+            <div class="btn-group" style="display: inline-flex;">
+              <button id="btnSortChrono" class="btn btn-sm btn-primary" onclick="App.setStagedSortOrder('chrono')" title="Sort chronologically (newest first)">🕒 Date</button>
+              <button id="btnSortAlpha" class="btn btn-sm" onclick="App.setStagedSortOrder('alpha')" title="Sort alphabetically (A-Z)">🔤 Name</button>
+            </div>
+          </div>
         </div>
+        <div id="stagedActiveFilterNote" style="font-size: 0.75rem; color: var(--text-muted); margin-top: -2px;"></div>
       </div>
 
       <div id="stagedJobsList">

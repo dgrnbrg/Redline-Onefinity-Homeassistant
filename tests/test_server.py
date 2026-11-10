@@ -6,6 +6,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from redline_job_linker.config import JobLinkerConfig
@@ -119,6 +120,35 @@ class TestServerEndpoints(unittest.TestCase):
         self.assertIn("stale_ttl_hours", res)
         self.assertIn("mtime", bracket)
         self.assertGreater(bracket["mtime"], 0)
+
+    def test_staged_jobs_chronological_and_alphabetical_sorting(self):
+        # Create file Zebra (older timestamp) and file Alpha (newer timestamp)
+        path_z = os.path.join(self.watched, "Zebra.ngc")
+        path_a = os.path.join(self.watched, "Alpha.ngc")
+        with open(path_z, "w") as f:
+            f.write(SAMPLE_NGC)
+        with open(path_a, "w") as f:
+            f.write(SAMPLE_NGC)
+        now = time.time()
+        os.utime(path_z, (now - 500, now - 500))
+        os.utime(path_a, (now - 50, now - 50))
+        self.context.scan_staged_jobs()
+
+        status, res = self._execute_http("GET", "/api/staged")
+        self.assertEqual(status, 200)
+        jobs = res["jobs"]
+
+        # Chronological sort (newest first) puts Alpha before Zebra
+        chrono_sorted = sorted(jobs, key=lambda j: j.get("mtime", 0), reverse=True)
+        alpha_idx = next(i for i, j in enumerate(chrono_sorted) if j["name"] == "Alpha")
+        zebra_idx = next(i for i, j in enumerate(chrono_sorted) if j["name"] == "Zebra")
+        self.assertLess(alpha_idx, zebra_idx)
+
+        # Alphabetical sort (A-Z) puts Alpha before Zebra
+        alpha_sorted = sorted(jobs, key=lambda j: j.get("name", ""))
+        alpha_idx_2 = next(i for i, j in enumerate(alpha_sorted) if j["name"] == "Alpha")
+        zebra_idx_2 = next(i for i, j in enumerate(alpha_sorted) if j["name"] == "Zebra")
+        self.assertLess(alpha_idx_2, zebra_idx_2)
 
     def test_get_job_detail_geometry(self):
         status, res = self._execute_http("GET", "/api/job/job_bracket")

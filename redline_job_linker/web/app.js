@@ -7,6 +7,8 @@ const App = (() => {
   let allStagedJobs = [];
   let stagedJobs = [];
   let stagedTimeFilter = '24h'; // '24h' by default, or 'all'
+  let stagedSortOrder = 'chrono_desc'; // 'chrono_desc' (default: newest first), 'chrono_asc', 'alpha_asc', 'alpha_desc'
+  let userExplicitSort = false;
   let stagedSearchQuery = '';
   let fixtureSlots = [];
   let selectedSlotId = null;
@@ -135,7 +137,7 @@ const App = (() => {
           } catch (_) {}
         }
       });
-      allStagedJobs.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+      // Dynamic sorting applied in applyStagedFilters()
       updateAutocompleteOptions();
       applyStagedFilters();
     } catch (e) {
@@ -175,9 +177,31 @@ const App = (() => {
       });
     }
 
+    // 3. Sorting (chronological by default for all files, or alphabetical)
+    if (stagedSortOrder === 'alpha_desc') {
+      jobs.sort((a, b) => (b.name || '').localeCompare(a.name || '', undefined, { numeric: true, sensitivity: 'base' }));
+    } else if (stagedSortOrder === 'alpha_asc' || stagedSortOrder === 'alpha') {
+      jobs.sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' }));
+    } else if (stagedSortOrder === 'chrono_asc') {
+      jobs.sort((a, b) => {
+        const timeA = a.mtime || 0;
+        const timeB = b.mtime || 0;
+        if (timeA !== timeB) return timeA - timeB;
+        return (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
+      });
+    } else {
+      // 'chrono_desc' / 'chrono' (default: newest first)
+      jobs.sort((a, b) => {
+        const timeA = a.mtime || 0;
+        const timeB = b.mtime || 0;
+        if (timeB !== timeA) return timeB - timeA;
+        return (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' });
+      });
+    }
+
     stagedJobs = jobs;
 
-    // 3. Update filter button styles and count badges
+    // 4. Update filter button styles and count badges
     const btn24h = document.getElementById('btnFilter24h');
     const btnAll = document.getElementById('btnFilterAll');
     if (btn24h && btnAll) {
@@ -188,6 +212,27 @@ const App = (() => {
       } else {
         btn24h.className = 'btn btn-sm';
         btnAll.className = 'btn btn-sm btn-primary';
+      }
+    }
+
+    // 5. Update sort button styles
+    const btnSortChrono = document.getElementById('btnSortChrono');
+    const btnSortAlpha = document.getElementById('btnSortAlpha');
+    if (btnSortChrono && btnSortAlpha) {
+      if (stagedSortOrder.startsWith('alpha')) {
+        btnSortChrono.className = 'btn btn-sm';
+        btnSortAlpha.className = 'btn btn-sm btn-primary';
+        btnSortChrono.textContent = '🕒 Date';
+        btnSortAlpha.textContent = stagedSortOrder === 'alpha_desc' ? '🔤 Z-A' : '🔤 A-Z';
+        btnSortAlpha.title = 'Sorted alphabetically. Click to toggle Z-A / A-Z';
+        btnSortChrono.title = 'Switch to chronological sort';
+      } else {
+        btnSortChrono.className = 'btn btn-sm btn-primary';
+        btnSortAlpha.className = 'btn btn-sm';
+        btnSortChrono.textContent = stagedSortOrder === 'chrono_asc' ? '🕒 Oldest' : '🕒 Newest';
+        btnSortAlpha.textContent = '🔤 Name';
+        btnSortChrono.title = 'Sorted chronologically. Click to toggle Newest / Oldest';
+        btnSortAlpha.title = 'Switch to alphabetical sort';
       }
     }
 
@@ -252,6 +297,32 @@ const App = (() => {
 
   function setStagedTimeFilter(filterType) {
     stagedTimeFilter = filterType;
+    if (filterType === 'all') {
+      // Default to chronological order (newest first) when showing all jobs
+      if (!userExplicitSort) {
+        stagedSortOrder = 'chrono_desc';
+      }
+    }
+    applyStagedFilters();
+  }
+
+  function setStagedSortOrder(order) {
+    if (order === 'chrono') {
+      if (stagedSortOrder === 'chrono_desc') {
+        stagedSortOrder = 'chrono_asc';
+      } else {
+        stagedSortOrder = 'chrono_desc';
+      }
+    } else if (order === 'alpha') {
+      if (stagedSortOrder === 'alpha_asc') {
+        stagedSortOrder = 'alpha_desc';
+      } else {
+        stagedSortOrder = 'alpha_asc';
+      }
+    } else {
+      stagedSortOrder = order;
+    }
+    userExplicitSort = true;
     applyStagedFilters();
   }
 
@@ -2326,6 +2397,7 @@ const App = (() => {
     onStagedSearch,
     clearStagedSearch,
     setStagedTimeFilter,
+    setStagedSortOrder,
     addJobToSequence,
     updateSlot,
     moveSlot,
