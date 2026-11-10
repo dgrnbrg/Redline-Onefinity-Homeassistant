@@ -435,7 +435,7 @@ class ControllerWorkflowManager:
 
             log(f"Sync complete: {len(uploaded)} file(s) uploaded in {time.perf_counter() - t_start:.2f}s")
             return {
-                "ok": len(uploaded) > 0,
+                "ok": len(uploaded) > 0 or len(files) == 0,
                 "workflow_key": workflow_key,
                 "uploaded": uploaded,
                 "replaced_earlier": replaced,

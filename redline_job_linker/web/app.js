@@ -912,7 +912,40 @@ const App = (() => {
 
   function onStrategyChanged(val) {
     activeStrategy = val;
+    updateStrategyUI();
     scheduleAutoSync();
+  }
+
+  function clearExecutionStrategy() {
+    activeStrategy = 'none';
+    const radios = document.querySelectorAll('input[name="batchStrategy"]');
+    radios.forEach(r => r.checked = false);
+    updateStrategyUI();
+    scheduleAutoSync();
+  }
+
+  function updateStrategyUI() {
+    const badge = document.getElementById('strategyStatusText');
+    const clearBtn = document.getElementById('btnClearStrategy');
+    if (activeStrategy === 'none' || !activeStrategy) {
+      if (badge) {
+        badge.textContent = '(None - Custom Sequence)';
+        badge.style.color = '#c084fc';
+      }
+      if (clearBtn) {
+        clearBtn.textContent = '✓ Cleared';
+        clearBtn.style.opacity = '0.7';
+      }
+    } else {
+      if (badge) {
+        badge.textContent = activeStrategy === 'tool_by_tool' ? '(Tool-by-Tool)' : '(Part-by-Part)';
+        badge.style.color = 'var(--accent)';
+      }
+      if (clearBtn) {
+        clearBtn.textContent = '✕ Clear Strategy';
+        clearBtn.style.opacity = '1.0';
+      }
+    }
   }
 
   function onSinglePartToggle(val) {
@@ -2292,6 +2325,8 @@ const App = (() => {
     document.getElementById('cfgPort').value = config.controller_port || 8080;
     document.getElementById('cfgTtl').value = config.stale_ttl_hours || 24;
     document.getElementById('cfgAutoSyncIdle').value = config.auto_sync_idle_seconds || 10;
+    const autoUploadEl = document.getElementById('cfgAutoUploadStaged');
+    if (autoUploadEl) autoUploadEl.checked = config.auto_upload_staged_enabled !== false;
     document.getElementById('cfgEpilogue').value = config.custom_epilogue || '';
     document.getElementById('settingsModal').style.display = 'flex';
   }
@@ -2331,6 +2366,7 @@ const App = (() => {
       controller_host: rawHost,
       controller_port: port,
       stale_ttl_hours: parseFloat(document.getElementById('cfgTtl').value) || 24.0,
+      auto_upload_staged_enabled: document.getElementById('cfgAutoUploadStaged') ? document.getElementById('cfgAutoUploadStaged').checked : true,
       auto_sync_idle_seconds: parseFloat(document.getElementById('cfgAutoSyncIdle').value) || 10.0,
       custom_epilogue: document.getElementById('cfgEpilogue').value,
     };
@@ -2404,6 +2440,7 @@ const App = (() => {
     duplicateSlot,
     removeSlot,
     onStrategyChanged,
+    clearExecutionStrategy,
     onSinglePartToggle,
     previewJob,
     onSafeZThresholdChange,

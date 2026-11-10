@@ -56,6 +56,7 @@ class TestServerEndpoints(unittest.TestCase):
             controller_host="127.0.0.1",
             controller_port=8080,
             server_port=8088,
+            auto_upload_staged_enabled=False,
         )
 
         cls.context = JobLinkerServerContext(cls.config)
@@ -188,6 +189,26 @@ class TestServerEndpoints(unittest.TestCase):
         content = res["files"][primary]
         self.assertIn("G54           ; Switch to fixture coordinate system", content)
         self.assertIn("M0 (MSG, Inspect fixture)", content)
+
+    def test_assemble_endpoint_cleared_strategy(self):
+        # When strategy is cleared to 'none' in manual sequencing mode
+        payload = {
+            "slots": [
+                {
+                    "slot_id": "slot_1",
+                    "job_id": "job_bracket",
+                    "wcs": "G54",
+                    "z_shift": 0.0,
+                }
+            ],
+            "strategy": "none",
+        }
+        status, res = self._execute_http("POST", "/api/assemble", body=payload)
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        primary = res["primary_filename"]
+        content = res["files"][primary]
+        self.assertIn("G54           ; Switch to fixture coordinate system", content)
 
 
     def test_staged_jobs_recursive_scan(self):
@@ -428,6 +449,89 @@ M30
         content = res["files"][primary]
         self.assertIn("G54           ; Switch to fixture coordinate system", content)
         self.assertIn("G55           ; Switch to fixture coordinate system", content)
+
+    def test_auto_upload_staged_files_with_expiry(self):
+        fresh_path = os.path.join(self.watched, "FreshJob.ngc")
+        with open(fresh_path, "w") as f:
+            f.write("G0 X0 Y0 Z10\nM30\n")
+
+        expired_path = os.path.join(self.watched, "ExpiredJob.ngc")
+        with open(expired_path, "w") as f:
+            f.write("G0 X5 Y5 Z10\nM30\n")
+
+        # Set expired file's mtime to 48 hours ago (> 24h TTL)
+        past_time = time.time() - (48 * 3600)
+        os.utime(expired_path, (past_time, past_time))
+
+        self.context.scan_staged_jobs()
+
+        mock_sync_calls = []
+
+        def mock_execute_sync(*args, **kwargs):
+            files = kwargs.get("files") or (args[0] if args else {})
+            workflow_key = kwargs.get("workflow_key") or (args[1] if len(args) > 1 else "")
+            ttl_hours = kwargs.get("ttl_hours") or (args[2] if len(args) > 2 else 24.0)
+            subfolder = kwargs.get("subfolder") or (args[3] if len(args) > 3 else "gcode/workflow")
+            mock_sync_calls.append({
+                "files": dict(files),
+                "workflow_key": workflow_key,
+                "ttl_hours": ttl_hours,
+                "subfolder": subfolder,
+            })
+            return {
+                "ok": True,
+                "workflow_key": workflow_key,
+                "uploaded": list(files.keys()),
+                "replaced_earlier": [],
+                "pruned_stale": [],
+                "logs": [],
+                "duration_sec": 0.05,
+            }
+
+        orig_execute_sync = self.context.controller_mgr.execute_sync
+        self.context.controller_mgr.execute_sync = mock_execute_sync
+
+        try:
+            # 1. Trigger staged sync
+            res = self.context.sync_staged_files_now()
+            self.assertIsNotNone(res)
+            self.assertTrue(res["ok"])
+
+            # Verify only non-expired files uploaded with their exact filenames
+            self.assertEqual(len(mock_sync_calls), 1)
+            uploaded_files = mock_sync_calls[0]["files"]
+            self.assertIn("FreshJob.ngc", uploaded_files)
+            self.assertNotIn("ExpiredJob.ngc", uploaded_files)
+            self.assertEqual(mock_sync_calls[0]["workflow_key"], "")
+
+            # 2. Subsequent sync without changes should be a no-op
+            mock_sync_calls.clear()
+            res_noop = self.context.sync_staged_files_now()
+            self.assertIsNone(res_noop)
+            self.assertEqual(len(mock_sync_calls), 0)
+
+            # 3. Touch/modify FreshJob.ngc -> should trigger re-upload
+            with open(fresh_path, "w") as f:
+                f.write("G0 X10 Y10 Z10\nM30\n")
+            new_time = time.time() + 2
+            os.utime(fresh_path, (new_time, new_time))
+
+            res_modified = self.context.sync_staged_files_now()
+            self.assertIsNotNone(res_modified)
+            self.assertEqual(len(mock_sync_calls), 1)
+            self.assertIn("FreshJob.ngc", mock_sync_calls[0]["files"])
+
+            # 4. Test POST /api/sync/staged endpoint
+            status, post_res = self._execute_http("POST", "/api/sync/staged")
+            self.assertEqual(status, 200)
+            self.assertTrue(post_res["ok"])
+        finally:
+            self.context.controller_mgr.execute_sync = orig_execute_sync
+            if os.path.exists(fresh_path):
+                os.remove(fresh_path)
+            if os.path.exists(expired_path):
+                os.remove(expired_path)
+            self.context.scan_staged_jobs()
 
 
 if __name__ == "__main__":

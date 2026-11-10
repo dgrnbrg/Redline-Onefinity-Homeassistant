@@ -179,6 +179,26 @@ class TestAssembler(unittest.TestCase):
         self.assertIn("Original WCS", content2)
         self.assertIn("Single Part: ACTIVE", content2)
 
+    def test_cleared_strategy_custom_sequence(self):
+        # Strategy set to 'none' or None executes slots sequentially in user sequence order
+        slots = [
+            FixtureSlotConfig(slot_id="s1", job=self.job_a, wcs="G54"),
+            FixtureSlotConfig(slot_id="s2", job=self.job_b, wcs="G55"),
+        ]
+        output = assemble_workflow(
+            slots=slots,
+            strategy="none",
+            timestamp_str="20261108_1200",
+        )
+        self.assertEqual(output.total_parts, 2)
+        content = output.files[output.primary_filename]
+        self.assertIn("G54           ; Switch to fixture coordinate system", content)
+        self.assertIn("G55           ; Switch to fixture coordinate system", content)
+        # Part 1 appears before Part 2 in sequential order
+        idx_s1 = content.find("FIXTURE SLOT 1")
+        idx_s2 = content.find("FIXTURE SLOT 2")
+        self.assertGreater(idx_s2, idx_s1)
+
     def test_custom_gcode_override_assembly(self):
         edited_code = """(Edited Bracket)
 T1 M6

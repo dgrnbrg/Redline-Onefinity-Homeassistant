@@ -146,7 +146,10 @@ def assemble_workflow(
 ) -> AssemblyOutput:
     """Assemble a multi-fixture workflow with safe transitions, pause injections, and epilogue."""
     single_part_mode = single_part or (strategy == "single_part_no_wcs")
-    effective_strategy = "part_by_part" if strategy == "single_part_no_wcs" else strategy
+    if not strategy or strategy in ("single_part_no_wcs", "none", "", None, "sequential", "sequence", "as_ordered"):
+        effective_strategy = "part_by_part"
+    else:
+        effective_strategy = strategy
 
     if not slots:
         return AssemblyOutput(

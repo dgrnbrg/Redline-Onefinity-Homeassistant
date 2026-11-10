@@ -30,6 +30,7 @@ class JobLinkerConfig:
     controller_subfolder: str = "gcode/workflow"
     stale_ttl_hours: float = 24.0
     auto_sync_enabled: bool = True
+    auto_upload_staged_enabled: bool = True
     auto_sync_idle_seconds: float = 10.0
     air_carve_height_mm: float = 25.0
     spoilboard_max_cut_depth_mm: float = 1.27  # 0.05 inches

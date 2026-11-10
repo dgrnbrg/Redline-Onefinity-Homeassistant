@@ -9,6 +9,8 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -41,6 +43,10 @@ class JobLinkerServerContext:
         self.staged_jobs: list[LogicalJob] = []
         self.sync_history: list[dict[str, Any]] = []
         self.watcher: DirectoryWatcher | None = None
+        self._staged_file_state: dict[str, tuple[float, int]] = {}
+        self._staged_upload_lock = threading.Lock()
+        self._staged_upload_in_progress = False
+        self._staged_upload_queued = False
         self.controller_mgr = ControllerWorkflowManager(
             host=cfg.controller_host,
             port=cfg.controller_port,
@@ -62,7 +68,7 @@ class JobLinkerServerContext:
             self.staged_jobs = []
 
     def on_files_changed(self, ready_files: list[str]) -> None:
-        self.scan_staged_jobs(ready_files)
+        self.scan_staged_jobs()
 
     def scan_staged_jobs(self, file_paths: list[str] | None = None) -> None:
         if file_paths is None:
@@ -84,6 +90,114 @@ class JobLinkerServerContext:
             spoilboard_max_cut_depth_mm=self.config.spoilboard_max_cut_depth_mm,
         )
         _LOGGER.info("Staged %d logical jobs", len(self.staged_jobs))
+
+        if self.config.auto_upload_staged_enabled:
+            self.trigger_auto_upload_staged()
+
+    def trigger_auto_upload_staged(self) -> None:
+        """Trigger background auto-upload of staged files to controller."""
+        if not self.config.auto_upload_staged_enabled:
+            return
+        with self._staged_upload_lock:
+            if self._staged_upload_in_progress:
+                self._staged_upload_queued = True
+                return
+            self._staged_upload_in_progress = True
+
+        worker = threading.Thread(target=self._run_auto_upload_worker, daemon=True)
+        worker.start()
+
+    def _run_auto_upload_worker(self) -> None:
+        while True:
+            try:
+                self.sync_staged_files_now()
+            except Exception as err:
+                _LOGGER.warning("Auto-upload staged files encountered an error: %s", err)
+
+            with self._staged_upload_lock:
+                if self._staged_upload_queued:
+                    self._staged_upload_queued = False
+                    continue
+                self._staged_upload_in_progress = False
+                break
+
+    def sync_staged_files_now(self) -> dict[str, Any] | None:
+        """Scan staged files, check TTL expiry & modification, and upload to controller."""
+        if not self.config.controller_host:
+            return None
+
+        now_sec = time.time()
+        ttl_hours = self.config.stale_ttl_hours
+        max_age_sec = ttl_hours * 3600.0 if ttl_hours > 0 else 0.0
+
+        files_to_upload: dict[str, str] = {}
+        pending_stats: dict[str, tuple[float, int]] = {}
+        active_paths: set[str] = set()
+
+        for job in list(self.staged_jobs):
+            for sf in job.subfiles:
+                path = sf.filepath
+                active_paths.add(path)
+                try:
+                    stat = os.stat(path)
+                    mtime = stat.st_mtime
+                    size = stat.st_size
+                except OSError:
+                    continue
+
+                # Expiry logic: skip files on disk that exceed stale_ttl_hours
+                if max_age_sec > 0 and (now_sec - mtime) > max_age_sec:
+                    _LOGGER.debug(
+                        "Skipping staged auto-upload for expired file: %s (age > %.1fh)",
+                        sf.filename,
+                        ttl_hours,
+                    )
+                    continue
+
+                # Check if file is new or modified
+                last_stat = self._staged_file_state.get(path)
+                if last_stat is None or last_stat != (mtime, size):
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as f:
+                            files_to_upload[sf.filename] = f.read()
+                        pending_stats[path] = (mtime, size)
+                    except OSError as err:
+                        _LOGGER.warning("Could not read staged file %s: %s", path, err)
+
+        # Prune state for deleted files
+        for dead_path in list(self._staged_file_state.keys()):
+            if dead_path not in active_paths:
+                self._staged_file_state.pop(dead_path, None)
+
+        if not files_to_upload:
+            return None
+
+        # Execute upload to controller with empty workflow_key so no earlier workflow replacement occurs
+        res = _run_async(
+            self.controller_mgr.execute_sync(
+                files=files_to_upload,
+                workflow_key="",
+                ttl_hours=self.config.stale_ttl_hours,
+                subfolder=self.config.controller_subfolder,
+            )
+        )
+
+        if res and res.get("ok"):
+            uploaded_set = set(res.get("uploaded", []))
+            for path, stat_tuple in pending_stats.items():
+                if os.path.basename(path) in uploaded_set:
+                    self._staged_file_state[path] = stat_tuple
+
+            history_entry = {
+                "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "auto_upload": True,
+                **res,
+            }
+            self.sync_history.insert(0, history_entry)
+            if len(self.sync_history) > 50:
+                self.sync_history = self.sync_history[:50]
+
+        return res
 
     def get_job_by_id(self, job_id: str) -> LogicalJob | None:
         for j in self.staged_jobs:
@@ -458,6 +572,14 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
                     **err_result,
                 })
                 self._send_json(err_result)
+            return
+
+        if path == "/api/sync/staged":
+            try:
+                res = self.context.sync_staged_files_now()
+                self._send_json({"ok": True, "result": res})
+            except Exception as err:
+                self._send_error(400, f"Staged sync failed: {err}")
             return
 
         self._send_error(404, "Endpoint not found")

@@ -448,8 +448,16 @@
 
       <!-- Batch Strategy Selector & Single Part Mode Checkbox -->
       <div class="card" style="padding: 10px 12px;">
-        <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px; font-weight: 600;">EXECUTION STRATEGY:</div>
-        <div style="display: flex; gap: 16px; font-size: 0.85rem; flex-wrap: wrap;">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">EXECUTION STRATEGY:</span>
+            <span id="strategyStatusText" style="font-size: 0.75rem; color: var(--accent); font-weight: 600;">(Part-by-Part)</span>
+          </div>
+          <button id="btnClearStrategy" class="btn btn-sm" onclick="App.clearExecutionStrategy()" title="Clear execution strategy to run slots as a direct sequence" style="padding: 2px 8px; font-size: 0.72rem;">
+            ✕ Clear Strategy
+          </button>
+        </div>
+        <div style="display: flex; gap: 16px; font-size: 0.85rem; flex-wrap: wrap; align-items: center;">
           <label style="cursor: pointer; display: flex; align-items: center; gap: 5px;">
             <input type="radio" name="batchStrategy" value="part_by_part" checked onchange="App.onStrategyChanged(this.value)">
             Part-by-Part (Sequential)
@@ -766,6 +774,13 @@
           <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">AUTO-SYNC IDLE (SEC):</label>
           <input type="number" id="cfgAutoSyncIdle" style="width: 100%;" value="10" min="2">
         </div>
+      </div>
+
+      <div style="margin-bottom: 12px;">
+        <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 8px; cursor: pointer;">
+          <input type="checkbox" id="cfgAutoUploadStaged" checked>
+          <span>Auto-upload staged bin files to controller as they exist / change</span>
+        </label>
       </div>
 
       <div style="margin-bottom: 16px;">
