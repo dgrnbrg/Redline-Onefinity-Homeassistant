@@ -457,14 +457,11 @@ const App = (() => {
       const opBadge = slot.op_name
         ? `<span class="badge" style="background: rgba(168,85,247,0.18); color: #c084fc; font-size: 0.72rem; padding: 2px 6px; margin-left: 6px;" title="Operation name">${escapeHtml(slot.op_name)}</span>`
         : '';
-      const focusBadge = isSelected
-        ? `<span class="badge" style="background: var(--accent); color: #fff; font-size: 0.7rem; font-weight: 700; padding: 2px 7px; margin-left: 6px;">ACTIVE FOCUS</span>`
-        : '';
 
       return `
         <div class="slot-card ${isSelected ? 'selected' : ''}" id="${slot.slot_id}" onclick="App.handleSlotCardClick(event, '${slot.slot_id}')" title="Click to focus and highlight Slot ${idx + 1} across 3D visualizer, timeline, and editor">
           <div class="slot-header">
-            <span>Slot ${idx + 1}: ${escapeHtml(slot.job_name)}${opBadge}${toolBadge}${editedBadge}${focusBadge}</span>
+            <span>Slot ${idx + 1}: ${escapeHtml(slot.job_name)}${opBadge}${toolBadge}${editedBadge}</span>
             <div class="btn-group">
               <button class="btn btn-sm ${isSelected ? 'btn-primary' : ''}" onclick="App.selectSlot('${slot.slot_id}')" title="Focus and highlight this slot in 3D visualizer, timeline, and editor">${isSelected ? '✓ Focused' : '🔍 Focus'}</button>
               <button class="btn btn-sm" onclick="App.openSlotInEditor('${slot.slot_id}')" title="Edit G-code text for this sequence slot">📝 Edit</button>
