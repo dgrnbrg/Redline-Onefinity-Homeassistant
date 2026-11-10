@@ -19,6 +19,8 @@ const App = (() => {
   let activeSafeZThreshold = 0.0;
   let activeInferredSafeZ = 0.0;
   let persistedSafeZByJobId = {};
+  let manualSplitsByJobId = {};
+  let activeClickedRapid = null;
   let safeZDebounceTimer = null;
 
   // Playback state
@@ -72,6 +74,16 @@ const App = (() => {
 
     // Check controller status periodically
     setInterval(checkControllerStatus, 10000);
+
+    // Close rapid tooltip when clicking outside
+    document.addEventListener('click', (e) => {
+      const tooltip = document.getElementById('rapidSplitTooltip');
+      if (!tooltip || tooltip.style.display === 'none') return;
+      if (tooltip.contains(e.target) || e.target.closest('.rapid-marker-dot')) {
+        return;
+      }
+      closeRapidTooltip();
+    });
   }
 
   async function loadConfig() {
@@ -917,7 +929,10 @@ const App = (() => {
       activeGeometryPoints = data.geometry || [];
 
       // Safe Z threshold & draggable widget setup
-      activeInferredSafeZ = (typeof data.safe_z_threshold === 'number') ? data.safe_z_threshold : 0.0;
+      const serverInferred = (typeof data.inferred_safe_z_threshold === 'number')
+        ? data.inferred_safe_z_threshold
+        : (typeof data.safe_z_threshold === 'number' ? data.safe_z_threshold : 0.0);
+      activeInferredSafeZ = serverInferred || inferSafeZThreshold(activeGeometryPoints, activeJobUnits);
       if (persistedSafeZByJobId[jobId] !== undefined) {
         activeSafeZThreshold = persistedSafeZByJobId[jobId];
       } else {
@@ -933,6 +948,20 @@ const App = (() => {
           activeSafeZThreshold = activeInferredSafeZ;
         }
       }
+
+      if (!manualSplitsByJobId[jobId]) {
+        try {
+          const storedSplits = localStorage.getItem(`manual_splits_${jobId}`);
+          if (storedSplits) {
+            manualSplitsByJobId[jobId] = new Set(JSON.parse(storedSplits));
+          } else {
+            manualSplitsByJobId[jobId] = new Set();
+          }
+        } catch (_) {
+          manualSplitsByJobId[jobId] = new Set();
+        }
+      }
+      closeRapidTooltip();
 
       const ext = data.extents || {};
       const minZ = (typeof ext.min_z === 'number') ? ext.min_z : -10;
@@ -958,8 +987,8 @@ const App = (() => {
 
       GcodeViewer.loadGeometry(activeGeometryPoints, activeSafeZThreshold);
 
-      // Re-evaluate ops if safe Z was customized
-      if (Math.abs(activeSafeZThreshold - activeInferredSafeZ) > 1e-4) {
+      // Re-evaluate ops if safe Z was customized or manual splits exist
+      if (Math.abs(activeSafeZThreshold - activeInferredSafeZ) > 1e-4 || (manualSplitsByJobId[jobId] && manualSplitsByJobId[jobId].size > 0)) {
         recalculateOperationsFromThreshold(activeSafeZThreshold);
       }
 
@@ -1038,23 +1067,112 @@ const App = (() => {
     }, 350);
   }
 
+  function inferSafeZThreshold(geometry, units) {
+    if (!geometry || geometry.length === 0) return 0.0;
+    const rapidPts = geometry.filter(p => p.type === 'rapid');
+    if (!rapidPts || rapidPts.length === 0) return 0.0;
+
+    const rapidZList = rapidPts.map(p => Math.round(p.z * 10000) / 10000);
+    const distinctZ = Array.from(new Set(rapidZList)).sort((a, b) => a - b);
+    const maxRapid = distinctZ[distinctZ.length - 1];
+    const fallback = Math.round((maxRapid + (units === 'imperial' ? 0.1 : 2.0)) * 10000) / 10000;
+
+    if (distinctZ.length <= 1) return fallback;
+
+    const cutPts = geometry.filter(p => p.type === 'linear' || p.type === 'arc');
+    if (!cutPts || cutPts.length === 0) return fallback;
+
+    const firstCutLine = Math.min(...cutPts.map(p => p.line));
+    const lastCutLine = Math.max(...cutPts.map(p => p.line));
+
+    const intermediateRapids = rapidPts.filter(p => p.line > firstCutLine && p.line < lastCutLine);
+    if (!intermediateRapids || intermediateRapids.length === 0) return fallback;
+
+    const minGap = units === 'imperial' ? 0.25 : 6.0;
+
+    for (let i = 1; i < distinctZ.length; i++) {
+      const lowerZ = distinctZ[i - 1];
+      const upperZ = distinctZ[i];
+      const gap = upperZ - lowerZ;
+
+      if (gap < minGap) continue;
+
+      let retractEvents = 0;
+      for (let idx = 0; idx < geometry.length; idx++) {
+        const pt = geometry[idx];
+        if (pt.line > firstCutLine && pt.line < lastCutLine) {
+          if (pt.type === 'rapid' && pt.z >= upperZ - 1e-4) {
+            const prevPt = idx > 0 ? geometry[idx - 1] : null;
+            if (!prevPt || prevPt.type !== 'rapid' || prevPt.z < upperZ - 1e-4) {
+              retractEvents++;
+            }
+          }
+        }
+      }
+
+      if (retractEvents >= 1 && retractEvents <= 2) {
+        return Math.round(((lowerZ + upperZ) / 2.0) * 10000) / 10000;
+      }
+    }
+
+    return fallback;
+  }
+
   function resetSafeZToInferred() {
+    if (activeGeometryPoints && activeGeometryPoints.length > 0) {
+      activeInferredSafeZ = inferSafeZThreshold(activeGeometryPoints, activeJobUnits);
+    }
     activeSafeZThreshold = activeInferredSafeZ;
+
     if (activePreviewJobId) {
       delete persistedSafeZByJobId[activePreviewJobId];
+      delete manualSplitsByJobId[activePreviewJobId];
       try {
         localStorage.removeItem(`safe_z_${activePreviewJobId}`);
+        localStorage.removeItem(`manual_splits_${activePreviewJobId}`);
       } catch (_) {}
+
       fetch(`/api/job/${activePreviewJobId}/safe_z`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ safe_z: activeInferredSafeZ })
-      }).catch(() => {});
+        body: JSON.stringify({
+          safe_z: activeInferredSafeZ,
+          manual_splits: [],
+          reset_to_inferred: true
+        })
+      }).then(res => res.json()).then(data => {
+        if (data && data.ok && data.operations) {
+          if (activeJobData) {
+            activeJobData.operations = data.operations;
+            activeJobData.safe_z_threshold = data.safe_z_threshold;
+          }
+          const tgtAll = allStagedJobs.find(j => j.id === activePreviewJobId);
+          if (tgtAll) {
+            tgtAll.operations = data.operations;
+            tgtAll.safe_z_threshold = data.safe_z_threshold;
+            delete tgtAll.custom_safe_z;
+          }
+          const tgtStaged = stagedJobs.find(j => j.id === activePreviewJobId);
+          if (tgtStaged) {
+            tgtStaged.operations = data.operations;
+            tgtStaged.safe_z_threshold = data.safe_z_threshold;
+            delete tgtStaged.custom_safe_z;
+          }
+          const cardBadge = document.getElementById(`opCountBadge_${activePreviewJobId}`);
+          if (cardBadge) {
+            cardBadge.textContent = `${data.operations.length} op${data.operations.length === 1 ? '' : 's'} (${data.operations.length} slot${data.operations.length === 1 ? '' : 's'})`;
+            cardBadge.title = data.operations.map(o => o.name).join(' | ');
+          }
+          renderTimelinePartMarkers();
+          renderTimelineRapidMarkers();
+        }
+      }).catch(err => console.warn('Could not reset safe Z on server', err));
     }
 
     const zSlider = document.getElementById('safeZSlider');
     if (zSlider) zSlider.value = activeSafeZThreshold;
     updateSafeZValDisplay();
+    closeRapidTooltip();
     GcodeViewer.updateSafeZThreshold(activeSafeZThreshold);
     recalculateOperationsFromThreshold(activeSafeZThreshold);
     renderTimelinePartMarkers();
@@ -1063,6 +1181,10 @@ const App = (() => {
 
   function recalculateOperationsFromThreshold(threshold) {
     if (!activeGeometryPoints || activeGeometryPoints.length === 0) return;
+
+    const manualSplits = (activePreviewJobId && manualSplitsByJobId[activePreviewJobId])
+      ? manualSplitsByJobId[activePreviewJobId]
+      : new Set();
 
     const cuttingPoints = activeGeometryPoints.filter(p => p.type === 'linear' || p.type === 'arc');
     const cuttingLines = new Set(cuttingPoints.map(p => p.line));
@@ -1079,6 +1201,13 @@ const App = (() => {
 
     for (let i = 0; i < activeGeometryPoints.length; i++) {
       const p = activeGeometryPoints[i];
+
+      // 0. Manual op split marked by user at this line
+      if (manualSplits.has(p.line)) {
+        splits.push({ line: p.line, tool: currentTool });
+        hasCutInOp = false;
+        continue;
+      }
 
       if (p.tool && p.tool !== currentTool) {
         splits.push({ line: p.line, tool: p.tool });
@@ -1343,29 +1472,133 @@ const App = (() => {
     track.innerHTML = '';
     if (!activeGeometryPoints || activeGeometryPoints.length === 0 || totalToolpathTime <= 0) return;
 
+    const manualSplits = (activePreviewJobId && manualSplitsByJobId[activePreviewJobId])
+      ? manualSplitsByJobId[activePreviewJobId]
+      : new Set();
+
     for (let i = 0; i < activeGeometryPoints.length; i++) {
       const p = activeGeometryPoints[i];
       if (p.type === 'rapid' && (i === 0 || activeGeometryPoints[i - 1].type !== 'rapid')) {
         const pct = (cumMoveTimes[i] / totalToolpathTime) * 100;
         const isOpChange = p.z >= activeSafeZThreshold;
+        const isManualSplit = manualSplits.has(p.line);
+
         const dot = document.createElement('div');
-        dot.className = 'rapid-marker-dot';
+        dot.className = 'rapid-marker-dot' + (isManualSplit ? ' manual-split' : '');
         dot.style.left = `${pct}%`;
-        if (isOpChange) {
+        if (isManualSplit) {
+          // Styled by .manual-split
+        } else if (isOpChange) {
           dot.style.background = '#fbbf24';
           dot.style.boxShadow = '0 0 6px #f59e0b';
         } else {
           dot.style.background = '#f43f5e';
           dot.style.boxShadow = '0 0 6px #e11d48';
         }
-        dot.title = `${isOpChange ? 'Op Change Rapid' : 'Stepover Rapid'} at line ${p.line} (Z: ${p.z.toFixed(2)}) - Click to jump`;
+
+        const splitLabel = isManualSplit
+          ? ' [Manual Op Split]'
+          : (isOpChange ? ' [Op Change Retract]' : ' [Stepover Hop]');
+        dot.title = `Line ${p.line} (Z: ${p.z.toFixed(2)})${splitLabel} - Click to configure op split`;
+
         const rapidIdx = i;
+        const rapidPct = pct;
         dot.addEventListener('click', (e) => {
           e.stopPropagation();
           jumpToPoint(rapidIdx);
+          openRapidSplitTooltip(rapidIdx, rapidPct);
         });
         track.appendChild(dot);
       }
+    }
+  }
+
+  function openRapidSplitTooltip(rapidIdx, pct) {
+    if (!activeGeometryPoints || !activeGeometryPoints[rapidIdx]) return;
+    const pt = activeGeometryPoints[rapidIdx];
+    activeClickedRapid = { index: rapidIdx, line: pt.line, z: pt.z, tool: pt.tool, pct };
+
+    const tooltip = document.getElementById('rapidSplitTooltip');
+    if (!tooltip) return;
+
+    const manualSplits = (activePreviewJobId && manualSplitsByJobId[activePreviewJobId])
+      ? manualSplitsByJobId[activePreviewJobId]
+      : new Set();
+    const isManualSplit = manualSplits.has(pt.line);
+    const isOpChange = pt.z >= activeSafeZThreshold;
+
+    const titleEl = document.getElementById('rapidTooltipTitle');
+    if (titleEl) {
+      titleEl.innerHTML = `<span>⚡</span> Rapid at Line ${pt.line}`;
+    }
+
+    const infoEl = document.getElementById('rapidTooltipInfo');
+    if (infoEl) {
+      const zStr = `${pt.z.toFixed(2)} ${activeJobUnits === 'imperial' ? 'in' : 'mm'}`;
+      const typeStr = isManualSplit
+        ? '<strong style="color:#c084fc;">Manual Op Split</strong>'
+        : (isOpChange ? '<strong style="color:#fbbf24;">Safe Z Clearance Retract</strong>' : '<strong style="color:#f43f5e;">Stepover Hop</strong>');
+      infoEl.innerHTML = `Height: <code>Z ${zStr}</code><br>Type: ${typeStr}<br>Tool: T${pt.tool || 1}`;
+    }
+
+    const btn = document.getElementById('btnToggleOpSplit');
+    if (btn) {
+      if (isManualSplit) {
+        btn.textContent = '✕ Remove Operation Split';
+        btn.className = 'btn btn-sm btn-danger';
+        btn.title = 'Remove this manual split point';
+      } else {
+        btn.textContent = '✂ Mark as separate operation?';
+        btn.className = 'btn btn-sm btn-primary';
+        btn.title = 'Split the job into a separate operation starting at this rapid move';
+      }
+    }
+
+    const clampedPct = Math.max(12, Math.min(88, pct));
+    tooltip.style.left = `${clampedPct}%`;
+    tooltip.style.display = 'block';
+  }
+
+  function closeRapidTooltip() {
+    const tooltip = document.getElementById('rapidSplitTooltip');
+    if (tooltip) tooltip.style.display = 'none';
+    activeClickedRapid = null;
+  }
+
+  function toggleManualOpSplitAtActiveRapid() {
+    if (!activeClickedRapid || !activePreviewJobId) return;
+    const line = activeClickedRapid.line;
+
+    if (!manualSplitsByJobId[activePreviewJobId]) {
+      manualSplitsByJobId[activePreviewJobId] = new Set();
+    }
+    const splits = manualSplitsByJobId[activePreviewJobId];
+
+    if (splits.has(line)) {
+      splits.delete(line);
+    } else {
+      splits.add(line);
+    }
+
+    try {
+      localStorage.setItem(`manual_splits_${activePreviewJobId}`, JSON.stringify(Array.from(splits)));
+    } catch (_) {}
+
+    fetch(`/api/job/${activePreviewJobId}/safe_z`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        safe_z: activeSafeZThreshold,
+        manual_splits: Array.from(splits)
+      })
+    }).catch(err => console.warn('Could not persist manual splits to server', err));
+
+    recalculateOperationsFromThreshold(activeSafeZThreshold);
+    renderTimelinePartMarkers();
+    renderTimelineRapidMarkers();
+
+    if (activeClickedRapid) {
+      openRapidSplitTooltip(activeClickedRapid.index, activeClickedRapid.pct);
     }
   }
 
@@ -2106,6 +2339,9 @@ const App = (() => {
     onScrub,
     step,
     jumpToPoint,
+    openRapidSplitTooltip,
+    closeRapidTooltip,
+    toggleManualOpSplitAtActiveRapid,
     togglePlay,
     setPlaybackSpeed,
     openInsertPauseDialog,

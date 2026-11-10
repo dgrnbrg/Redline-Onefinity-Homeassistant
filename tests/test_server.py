@@ -273,6 +273,90 @@ M30
         self.assertEqual(res["safe_z_threshold"], 3.5)
         self.assertIn("operations", res)
 
+    def test_job_manual_splits_endpoint(self):
+        status, res = self._execute_http(
+            "POST",
+            "/api/job/job_bracket/safe_z",
+            body={"safe_z": 3.5, "manual_splits": [3]}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        self.assertIn("operations", res)
+        # Should contain an op starting at line 3
+        starts = [op["start_line"] for op in res["operations"]]
+        self.assertIn(3, starts)
+
+    def test_job_auto_reset_endpoint(self):
+        # Override first
+        self._execute_http(
+            "POST",
+            "/api/job/job_bracket/safe_z",
+            body={"safe_z": 1.0, "manual_splits": [3]}
+        )
+        # Now trigger Auto Reset
+        status, res = self._execute_http(
+            "POST",
+            "/api/job/job_bracket/safe_z",
+            body={"reset_to_inferred": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(res["ok"])
+        # Should be reset to conservative threshold (>= 7.0 since job_bracket max rapid is 5.0mm)
+        self.assertGreaterEqual(res["safe_z_threshold"], 7.0)
+        self.assertEqual(len(res["operations"]), 1)
+        self.assertEqual(res["operations"][0]["start_line"], 1)
+
+    def test_surfacing_job_auto_reset_end_to_end(self):
+        # Program simulating multi-pass surfacing with routine 5.0mm clearance retracts
+        gcode = """G21
+G0 X0 Y0 Z5.0
+G1 Z-1.0 F300
+G1 X10.0
+G0 Z1.0
+G0 X12.0
+G1 Z-1.0
+G1 X20.0
+G0 Z5.0
+G0 X22.0
+G1 Z-1.0
+G1 X30.0
+G0 Z5.0
+G0 X32.0
+G1 Z-1.0
+G1 X40.0
+G0 Z5.0
+M30
+"""
+        surf_path = os.path.join(self.watched, "Surfacing.ngc")
+        with open(surf_path, "w") as f:
+            f.write(gcode)
+        self.context.scan_staged_jobs()
+        job = self.context.get_job_by_id("job_surfacing")
+        self.assertIsNotNone(job)
+
+        # Inferred threshold must be above 5.0 (5.0 + 2.0 = 7.0) -> exactly 1 operation
+        self.assertGreaterEqual(job.combined_parsed_job.safe_z_threshold, 7.0)
+        self.assertEqual(len(job.combined_parsed_job.operations), 1)
+
+        # 1. Override safe_z to 3.0 -> forces splits at every 5.0mm retract
+        status, res = self._execute_http(
+            "POST",
+            "/api/job/job_surfacing/safe_z",
+            body={"safe_z": 3.0}
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(len(res["operations"]), 1)
+
+        # 2. Trigger Auto Reset -> must revert to conservative threshold and 1 operation
+        status, res = self._execute_http(
+            "POST",
+            "/api/job/job_surfacing/safe_z",
+            body={"reset_to_inferred": True}
+        )
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(res["safe_z_threshold"], 7.0)
+        self.assertEqual(len(res["operations"]), 1)
+
     def test_job_gcode_sliced_endpoint(self):
         status, res = self._execute_http("GET", "/api/job/job_bracket/gcode?start=2&end=4")
         self.assertEqual(status, 200)

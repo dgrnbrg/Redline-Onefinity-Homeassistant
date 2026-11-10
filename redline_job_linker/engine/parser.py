@@ -94,6 +94,7 @@ class ParsedJob:
     toolpath_geometry: list[ToolpathPoint]
     units: str = "metric"  # "metric" (G21) or "imperial" (G20)
     safe_z_threshold: float = 0.0
+    inferred_safe_z_threshold: float = 0.0
     operations: list[OperationInfo] = field(default_factory=list)
 
 
@@ -366,6 +367,7 @@ def parse_gcode(content: str, filename: str = "job.ngc") -> ParsedJob:
         toolpath_geometry=geometry,
         units=units,
         safe_z_threshold=safe_z_threshold,
+        inferred_safe_z_threshold=safe_z_threshold,
         operations=operations,
     )
 
@@ -374,36 +376,64 @@ def _infer_safe_z_threshold(
     geometry: list[ToolpathPoint],
     units: str,
 ) -> float:
-    """Infer the safe Z retract height boundary separating local stepover rapids from clearance retracts."""
+    """Conservatively infer the safe Z retract height boundary separating local hops from true op clearance retracts.
+
+    Routine clearance retracts and stepover hops that occur repeatedly throughout cutting (>= 3 times)
+    are treated as intra-operation moves and do NOT cause operation splits.
+    Only genuine isolated retracts (count <= 2) with a significant clearance gap (>= 6mm or >= 0.25 in)
+    delineate operation boundaries. Otherwise, the threshold is placed conservatively above max_rapid.
+    """
     all_rapid_z = [round(pt.z, 4) for pt in geometry if pt.motion_type == "rapid"]
     if not all_rapid_z:
         return 0.0
 
-    cutting_points = [pt for pt in geometry if pt.motion_type in ("linear", "arc")]
-    max_cut_z = max((pt.z for pt in cutting_points), default=0.0)
     distinct_rapid_z = sorted(list(set(all_rapid_z)))
+    max_rapid = distinct_rapid_z[-1]
+    fallback_threshold = round(max_rapid + (2.0 if units == "metric" else 0.1), 4)
 
-    if len(distinct_rapid_z) == 1:
-        return distinct_rapid_z[0]
+    if len(distinct_rapid_z) <= 1:
+        return fallback_threshold
 
-    # Reference surface: top of cutting or stock zero (whichever is higher)
-    ref_surface = max(0.0, max_cut_z)
-    stepover_margin = 2.0 if units == "metric" else 0.08
+    cutting_points = [pt for pt in geometry if pt.motion_type in ("linear", "arc")]
+    if not cutting_points:
+        return fallback_threshold
 
-    stepovers = [z for z in distinct_rapid_z if z <= ref_surface + stepover_margin]
-    clearances = [z for z in distinct_rapid_z if z > ref_surface + stepover_margin]
+    first_cut_line = min(pt.line_number for pt in cutting_points)
+    last_cut_line = max(pt.line_number for pt in cutting_points)
 
-    if stepovers and clearances:
-        # Halfway between highest stepover rapid and lowest clearance retract
-        return round((max(stepovers) + min(clearances)) / 2.0, 4)
-    elif clearances:
-        # If all rapids are above ref_surface + margin, stepover is lowest level
-        if len(distinct_rapid_z) > 1:
-            return round((distinct_rapid_z[0] + distinct_rapid_z[1]) / 2.0, 4)
-        return distinct_rapid_z[0]
-    else:
-        # All rapids are low; threshold between lowest and highest rapid
-        return round((distinct_rapid_z[0] + distinct_rapid_z[-1]) / 2.0, 4)
+    intermediate_rapids = [
+        pt for pt in geometry
+        if pt.motion_type == "rapid" and first_cut_line < pt.line_number < last_cut_line
+    ]
+    if not intermediate_rapids:
+        return fallback_threshold
+
+    min_gap = 6.0 if units == "metric" else 0.25
+
+    # Look for an isolated high retract tier between cutting moves
+    for i in range(1, len(distinct_rapid_z)):
+        lower_z = distinct_rapid_z[i - 1]
+        upper_z = distinct_rapid_z[i]
+        gap = upper_z - lower_z
+
+        if gap < min_gap:
+            continue
+
+        # Count distinct retract events into this upper rapid tier
+        retract_events = 0
+        for idx, pt in enumerate(geometry):
+            if first_cut_line < pt.line_number < last_cut_line:
+                if pt.motion_type == "rapid" and pt.z >= upper_z - 1e-4:
+                    prev_pt = geometry[idx - 1] if idx > 0 else None
+                    if prev_pt is None or prev_pt.motion_type != "rapid" or prev_pt.z < upper_z - 1e-4:
+                        retract_events += 1
+
+        # Isolated retract tier between operations: occurs 1 or 2 times with a distinct clearance gap
+        if 1 <= retract_events <= 2:
+            return round((lower_z + upper_z) / 2.0, 4)
+
+    # Conservative default: above max rapid so routine hops do not cause spurious op splits
+    return fallback_threshold
 
 
 def _infer_operations(
@@ -412,14 +442,16 @@ def _infer_operations(
     units: str,
     tool_descriptions: dict[int, str],
     safe_z_threshold: float | None = None,
+    manual_splits: list[int] | None = None,
 ) -> tuple[list[OperationInfo], float]:
-    """Infer distinct machining operations by tool changes and safe Z retracts."""
+    """Infer distinct machining operations by tool changes, safe Z retracts, and manual split points."""
     if not parsed_lines:
         return [], 0.0
 
     if safe_z_threshold is None:
         safe_z_threshold = _infer_safe_z_threshold(geometry, units)
 
+    manual_split_set = set(manual_splits or [])
     cutting_points = [pt for pt in geometry if pt.motion_type in ("linear", "arc")]
     cutting_lines = set(pt.line_number for pt in cutting_points)
     max_cutting_line = max(cutting_lines, default=0)
@@ -439,6 +471,12 @@ def _infer_operations(
     has_cut_in_op = False
 
     for line in parsed_lines:
+        # 0. User manually marked operation split
+        if line.line_number in manual_split_set:
+            split_points.append((line.line_number, current_tool))
+            has_cut_in_op = False
+            continue
+
         # 1. Tool change delineates an op
         if line.is_tool_change and line.tool_number is not None and line.tool_number != current_tool:
             split_points.append((line.line_number, line.tool_number))

@@ -148,6 +148,117 @@ M30
         self.assertLess(job.safe_z_threshold, 0.30)
         self.assertEqual(len(job.operations), 2)
 
+    def test_conservative_safe_z_inference_with_small_hops(self):
+        # Program with only small stepover hops (gap <= 1.0mm)
+        # Should NOT split into multiple ops automatically
+        gcode = """G21
+G0 X0 Y0 Z1.0
+G1 Z-2.0 F300
+G1 X10.0
+G0 Z1.5
+G0 X12.0
+G1 Z-2.0
+G1 X20.0
+G0 Z1.5
+M30
+"""
+        job = parse_gcode(gcode)
+        # Safe Z threshold should be placed conservatively above max rapid (1.5 + 2.0 = 3.5)
+        self.assertGreaterEqual(job.safe_z_threshold, 3.5)
+        self.assertEqual(len(job.operations), 1)
+
+    def test_conservative_safe_z_inference_with_routine_clearance_hops(self):
+        # Program with multiple passes that repeatedly retract to 5.0mm clearance
+        # Even with a 4.0mm gap between Z1.0 hop and Z5.0 clearance, repeated retracts
+        # must NOT be treated as operation splits.
+        gcode = """G21
+G0 X0 Y0 Z5.0
+G1 Z-2.0 F300
+G1 X10.0
+G0 Z1.0
+G0 X12.0
+G1 Z-2.0
+G1 X20.0
+G0 Z5.0
+G0 X22.0
+G1 Z-2.0
+G1 X30.0
+G0 Z1.0
+G0 X32.0
+G1 Z-2.0
+G1 X40.0
+G0 Z5.0
+G0 X42.0
+G1 Z-2.0
+G1 X50.0
+G0 Z5.0
+M30
+"""
+        job = parse_gcode(gcode)
+        # Threshold should be conservatively placed above 5.0 (5.0 + 2.0 = 7.0)
+        self.assertGreaterEqual(job.safe_z_threshold, 7.0)
+        self.assertEqual(len(job.operations), 1)
+
+    def test_conservative_safe_z_inference_with_isolated_op_retract(self):
+        # Program with routine hops at Z=1.0 and Z=5.0, but an isolated high clearance retract
+        # to Z=25.0 between two distinct machining sections.
+        gcode = """G21
+G0 X0 Y0 Z5.0
+G1 Z-2.0 F300
+G1 X10.0
+G0 Z1.0
+G0 X12.0
+G1 Z-2.0
+G1 X20.0
+G0 Z25.0
+G0 X50.0 Y50.0
+G1 Z-2.0
+G1 X60.0
+G0 Z1.0
+G0 X62.0
+G1 Z-2.0
+G1 X70.0
+G0 Z25.0
+M30
+"""
+        job = parse_gcode(gcode)
+        # Threshold should be between 5.0 and 25.0 (approx 15.0)
+        self.assertGreater(job.safe_z_threshold, 5.0)
+        self.assertLess(job.safe_z_threshold, 25.0)
+        self.assertEqual(len(job.operations), 2)
+        self.assertEqual(job.operations[0].end_line, 8)
+        self.assertEqual(job.operations[1].start_line, 9)
+
+    def test_manual_op_splits(self):
+        # Program with single op, then manually split at line 5 (the G0 Z1.5 rapid)
+        gcode = """G21
+G0 X0 Y0 Z1.0
+G1 Z-2.0 F300
+G1 X10.0
+G0 Z1.5
+G0 X12.0
+G1 Z-2.0
+G1 X20.0
+G0 Z1.5
+M30
+"""
+        job = parse_gcode(gcode)
+        self.assertEqual(len(job.operations), 1)
+
+        from redline_job_linker.engine.parser import _infer_operations
+        ops, _ = _infer_operations(
+            parsed_lines=job.lines,
+            geometry=job.toolpath_geometry,
+            units=job.units,
+            tool_descriptions=job.tool_descriptions,
+            safe_z_threshold=job.safe_z_threshold,
+            manual_splits=[5],
+        )
+        self.assertEqual(len(ops), 2)
+        self.assertEqual(ops[0].start_line, 1)
+        self.assertEqual(ops[0].end_line, 4)
+        self.assertEqual(ops[1].start_line, 5)
+
 
 if __name__ == "__main__":
     unittest.main()

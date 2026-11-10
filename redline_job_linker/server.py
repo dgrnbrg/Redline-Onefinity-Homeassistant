@@ -309,39 +309,55 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
                 self._send_error(404, f"Job {job_id} not found")
                 return
             new_z = body.get("safe_z")
-            if new_z is not None:
-                try:
-                    threshold = float(new_z)
-                    job.combined_parsed_job.safe_z_threshold = threshold
-                    from .engine.parser import _infer_operations
-                    new_ops, _ = _infer_operations(
-                        parsed_lines=job.combined_parsed_job.lines,
+            manual_splits = body.get("manual_splits")
+            reset_to_inferred = bool(body.get("reset_to_inferred", False))
+
+            try:
+                from .engine.parser import _infer_safe_z_threshold, _infer_operations
+                if reset_to_inferred:
+                    threshold = _infer_safe_z_threshold(
                         geometry=job.combined_parsed_job.toolpath_geometry,
                         units=job.combined_parsed_job.units,
-                        tool_descriptions=job.combined_parsed_job.tool_descriptions,
-                        safe_z_threshold=threshold,
                     )
-                    job.combined_parsed_job.operations = new_ops
-                    self._send_json({
-                        "ok": True,
-                        "job_id": job_id,
-                        "safe_z_threshold": threshold,
-                        "operations": [
-                            {
-                                "op": op.op_number,
-                                "name": op.name,
-                                "tool": op.tool_number,
-                                "start_line": op.start_line,
-                                "end_line": op.end_line,
-                                "lines": op.total_lines,
-                            }
-                            for op in new_ops
-                        ],
-                    })
-                    return
-                except Exception as err:
-                    self._send_error(400, f"Failed updating safe Z: {err}")
-                    return
+                    job.combined_parsed_job.safe_z_threshold = threshold
+                    job.combined_parsed_job.inferred_safe_z_threshold = threshold
+                    manual_splits = []
+                elif new_z is not None:
+                    threshold = float(new_z)
+                    job.combined_parsed_job.safe_z_threshold = threshold
+                else:
+                    threshold = job.combined_parsed_job.safe_z_threshold
+
+                new_ops, _ = _infer_operations(
+                    parsed_lines=job.combined_parsed_job.lines,
+                    geometry=job.combined_parsed_job.toolpath_geometry,
+                    units=job.combined_parsed_job.units,
+                    tool_descriptions=job.combined_parsed_job.tool_descriptions,
+                    safe_z_threshold=threshold,
+                    manual_splits=manual_splits,
+                )
+                job.combined_parsed_job.operations = new_ops
+                self._send_json({
+                    "ok": True,
+                    "job_id": job_id,
+                    "safe_z_threshold": threshold,
+                    "inferred_safe_z_threshold": getattr(job.combined_parsed_job, "inferred_safe_z_threshold", threshold),
+                    "operations": [
+                        {
+                            "op": op.op_number,
+                            "name": op.name,
+                            "tool": op.tool_number,
+                            "start_line": op.start_line,
+                            "end_line": op.end_line,
+                            "lines": op.total_lines,
+                        }
+                        for op in new_ops
+                    ],
+                })
+                return
+            except Exception as err:
+                self._send_error(400, f"Failed updating safe Z: {err}")
+                return
 
         if path == "/api/config":
             try:

@@ -215,11 +215,47 @@
       box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
       transition: transform 0.12s ease, box-shadow 0.12s ease;
     }
+    .rapid-marker-dot::after {
+      content: '';
+      position: absolute;
+      top: -8px; left: -8px; right: -8px; bottom: -8px;
+    }
     .rapid-marker-dot:hover {
       transform: translate(-50%, -50%) scale(1.6);
       background: #fb7185;
       box-shadow: 0 0 8px #f43f5e;
       z-index: 10;
+    }
+    .rapid-marker-dot.manual-split {
+      border: 2px solid #a855f7 !important;
+      background: #c084fc !important;
+      box-shadow: 0 0 8px #a855f7 !important;
+      transform: translate(-50%, -50%) scale(1.3);
+    }
+    .rapid-split-popover {
+      position: absolute;
+      bottom: 34px;
+      z-index: 35;
+      background: var(--bg-panel);
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 10px 14px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.7), 0 0 12px rgba(14, 165, 233, 0.25);
+      min-width: 220px;
+      transform: translateX(-50%);
+      pointer-events: auto;
+    }
+    .rapid-split-popover::after {
+      content: '';
+      position: absolute;
+      bottom: -6px;
+      left: 50%;
+      transform: translateX(-50%);
+      border-width: 6px 6px 0;
+      border-style: solid;
+      border-color: var(--accent) transparent;
+      display: block;
+      width: 0;
     }
 
     /* Map pins for Tool Changes and Parts/Operations */
@@ -549,6 +585,20 @@
             <div id="timelineSlotHighlightTrack" style="position: absolute; inset: 0; pointer-events: none; z-index: 5;"></div>
             <div id="timelineMarkersTrack" style="position: absolute; inset: 0; pointer-events: none;"></div>
             <div id="pauseMarkersTrack" style="position: absolute; inset: 0; pointer-events: none;"></div>
+
+            <!-- Rapid Move Split Tooltip Popover -->
+            <div id="rapidSplitTooltip" class="rapid-split-popover" style="display: none;">
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px;">
+                <strong id="rapidTooltipTitle" style="font-size: 0.82rem; color: #fff; display: flex; align-items: center; gap: 4px;">
+                  <span>⚡</span> Rapid Point
+                </strong>
+                <button onclick="App.closeRapidTooltip()" style="background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.85rem; padding: 0 2px;" title="Close">✕</button>
+              </div>
+              <div id="rapidTooltipInfo" style="font-size: 0.74rem; color: var(--text-muted); margin-bottom: 8px;"></div>
+              <button id="btnToggleOpSplit" class="btn btn-sm btn-primary" onclick="App.toggleManualOpSplitAtActiveRapid()" style="width: 100%; justify-content: center; font-size: 0.76rem;">
+                ✂ Mark as separate operation?
+              </button>
+            </div>
           </div>
 
           <div class="playback-controls">

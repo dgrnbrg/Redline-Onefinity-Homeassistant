@@ -90,6 +90,7 @@ class LogicalJob:
             ],
             "tools_used": self.tools_used,
             "safe_z_threshold": self.combined_parsed_job.safe_z_threshold,
+            "inferred_safe_z_threshold": getattr(self.combined_parsed_job, "inferred_safe_z_threshold", self.combined_parsed_job.safe_z_threshold),
             "total_lines": self.total_lines,
             "extents": {
                 "min_x": self.min_x,
@@ -232,6 +233,22 @@ def group_files_into_logical_jobs(
             combined_sections.extend(parsed.tool_sections)
             all_geometry.extend(parsed.toolpath_geometry)
 
+        # Determine safe Z threshold and operations for combined job
+        if len(items) == 1:
+            first_parsed = items[0][2]
+            combined_safe_z = first_parsed.safe_z_threshold
+            combined_inferred_safe_z = getattr(first_parsed, "inferred_safe_z_threshold", first_parsed.safe_z_threshold)
+            combined_ops = first_parsed.operations
+        else:
+            from .parser import _infer_operations
+            combined_ops, combined_safe_z = _infer_operations(
+                parsed_lines=combined_lines,
+                geometry=all_geometry,
+                units=items[0][2].units,
+                tool_descriptions=items[0][2].tool_descriptions,
+            )
+            combined_inferred_safe_z = combined_safe_z
+
         # Build synthesized parsed job for the unified logical job
         combined_job = ParsedJob(
             filename=f"{base_name}.ngc",
@@ -254,6 +271,9 @@ def group_files_into_logical_jobs(
             positive_cutting_moves=sum(it[2].positive_cutting_moves for it in items),
             toolpath_geometry=all_geometry,
             units=items[0][2].units,
+            safe_z_threshold=combined_safe_z,
+            inferred_safe_z_threshold=combined_inferred_safe_z,
+            operations=combined_ops,
         )
 
         z_analysis = detect_z_origin(
