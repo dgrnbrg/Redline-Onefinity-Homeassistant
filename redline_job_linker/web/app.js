@@ -9,6 +9,8 @@ const App = (() => {
   let stagedTimeFilter = '24h'; // '24h' by default, or 'all'
   let stagedSearchQuery = '';
   let fixtureSlots = [];
+  let selectedSlotId = null;
+  let isShowingSlotOnlyInEditor = false;
   let activeStrategy = "part_by_part";
   let isSinglePartMode = false;
   let isSyncing = false;
@@ -416,11 +418,31 @@ const App = (() => {
         <div style="text-align: center; padding: 24px 0; color: var(--text-muted); font-size: 0.85rem;">
           No jobs in fixture sequence yet.<br>Click <strong>"+ Add to Run"</strong> from the staging bin below.
         </div>`;
+      selectedSlotId = null;
       updateAirCarveBanner();
       return;
     }
 
-    container.innerHTML = fixtureSlots.map((slot, idx) => {
+    let toolbarHtml = '';
+    if (selectedSlotId) {
+      const selSlot = fixtureSlots.find(s => s.slot_id === selectedSlotId);
+      if (selSlot) {
+        const selIdx = fixtureSlots.indexOf(selSlot) + 1;
+        toolbarHtml = `
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; margin-bottom: 10px; background: rgba(14, 165, 233, 0.15); border: 1px solid var(--accent); border-radius: 6px;">
+            <span style="font-size: 0.78rem; color: #38bdf8; font-weight: 700;">
+              🔍 Focusing Slot ${selIdx}: ${escapeHtml(selSlot.job_name)}
+            </span>
+            <button class="btn btn-sm" onclick="App.clearSelectedSlot()" style="padding: 2px 8px; font-size: 0.72rem;" title="Clear slot selection and show full job in 3D & timeline">Clear Focus</button>
+          </div>
+        `;
+      } else {
+        selectedSlotId = null;
+      }
+    }
+
+    const cardsHtml = fixtureSlots.map((slot, idx) => {
+      const isSelected = (slot.slot_id === selectedSlotId);
       const wcsSelect = WCS_OPTIONS.map(opt => {
         const lbl = opt === 'none' ? 'None (Preserve File WCS)' : opt;
         return `<option value="${opt}" ${opt === slot.wcs ? 'selected' : ''}>${lbl}</option>`;
@@ -435,12 +457,16 @@ const App = (() => {
       const opBadge = slot.op_name
         ? `<span class="badge" style="background: rgba(168,85,247,0.18); color: #c084fc; font-size: 0.72rem; padding: 2px 6px; margin-left: 6px;" title="Operation name">${escapeHtml(slot.op_name)}</span>`
         : '';
+      const focusBadge = isSelected
+        ? `<span class="badge" style="background: var(--accent); color: #fff; font-size: 0.7rem; font-weight: 700; padding: 2px 7px; margin-left: 6px;">ACTIVE FOCUS</span>`
+        : '';
 
       return `
-        <div class="slot-card" id="${slot.slot_id}">
+        <div class="slot-card ${isSelected ? 'selected' : ''}" id="${slot.slot_id}" onclick="App.handleSlotCardClick(event, '${slot.slot_id}')" title="Click to focus and highlight Slot ${idx + 1} across 3D visualizer, timeline, and editor">
           <div class="slot-header">
-            <span>Slot ${idx + 1}: ${escapeHtml(slot.job_name)}${opBadge}${toolBadge}${editedBadge}</span>
+            <span>Slot ${idx + 1}: ${escapeHtml(slot.job_name)}${opBadge}${toolBadge}${editedBadge}${focusBadge}</span>
             <div class="btn-group">
+              <button class="btn btn-sm ${isSelected ? 'btn-primary' : ''}" onclick="App.selectSlot('${slot.slot_id}')" title="Focus and highlight this slot in 3D visualizer, timeline, and editor">${isSelected ? '✓ Focused' : '🔍 Focus'}</button>
               <button class="btn btn-sm" onclick="App.openSlotInEditor('${slot.slot_id}')" title="Edit G-code text for this sequence slot">📝 Edit</button>
               <button class="btn btn-sm" onclick="App.moveSlot(${idx}, -1)" ${idx === 0 ? 'disabled' : ''} title="Move slot up in sequence">▲</button>
               <button class="btn btn-sm" onclick="App.moveSlot(${idx}, 1)" ${idx === fixtureSlots.length - 1 ? 'disabled' : ''} title="Move slot down in sequence">▼</button>
@@ -499,8 +525,273 @@ const App = (() => {
       `;
     }).join('');
 
+    container.innerHTML = toolbarHtml + cardsHtml;
     updateAirCarveBanner();
     renderTimelinePauseMarkers();
+    if (selectedSlotId) {
+      const activeSlot = fixtureSlots.find(s => s.slot_id === selectedSlotId);
+      if (activeSlot) {
+        renderTimelineSlotHighlight(activeSlot);
+      }
+    }
+  }
+
+  function handleSlotCardClick(e, slotId) {
+    if (e.target.closest('button') || e.target.closest('input') || e.target.closest('select') || e.target.closest('option') || e.target.closest('label')) {
+      return;
+    }
+    selectSlot(slotId);
+  }
+
+  async function selectSlot(slotId) {
+    if (selectedSlotId === slotId) {
+      // Toggle off if clicking the already focused slot
+      clearSelectedSlot();
+      return;
+    }
+
+    const slot = fixtureSlots.find(s => s.slot_id === slotId);
+    if (!slot) return;
+
+    selectedSlotId = slotId;
+    activeEditorSlotId = slotId;
+
+    // 1. Ensure the correct job is loaded into the 3D viewer & timeline
+    if (activePreviewJobId !== slot.job_id) {
+      await previewJob(slot.job_id);
+    }
+
+    // 2. Highlight card in fixture sequence list
+    renderFixtureSlots();
+
+    // 3. Highlight toolpath lines in 3D WebGL visualizer
+    if (typeof GcodeViewer.setHighlightRange === 'function') {
+      const sLine = (slot.start_line !== undefined) ? slot.start_line : 1;
+      const eLine = (slot.end_line !== undefined) ? slot.end_line : (activeJobData ? activeJobData.total_lines : 999999);
+      GcodeViewer.setHighlightRange(sLine, eLine);
+
+      // Position toolhead cursor at the start of this slot's cut
+      if (activeGeometryPoints && activeGeometryPoints.length > 0) {
+        const ptIdx = activeGeometryPoints.findIndex(pt => pt.line >= sLine);
+        if (ptIdx >= 0) {
+          GcodeViewer.setCursor(ptIdx);
+        }
+      }
+    }
+
+    // 4. Highlight zone in timeline scrubber
+    renderTimelineSlotHighlight(slot);
+
+    // 5. Highlight and scroll in G-code text editor
+    await updateEditorForSelectedSlot(slot);
+  }
+
+  function clearSelectedSlot() {
+    selectedSlotId = null;
+    activeEditorSlotId = null;
+
+    // Clear 3D highlight
+    if (typeof GcodeViewer.setHighlightRange === 'function') {
+      GcodeViewer.setHighlightRange(null, null);
+    }
+
+    // Clear timeline highlight
+    const hlTrack = document.getElementById('timelineSlotHighlightTrack');
+    if (hlTrack) hlTrack.innerHTML = '';
+
+    // Clear editor banner & selection
+    const banner = document.getElementById('editorSlotBanner');
+    if (banner) banner.style.display = 'none';
+
+    const label = document.getElementById('editorTargetLabel');
+    if (label && activeJobData) {
+      label.textContent = `Previewing: ${activeJobData.name || activePreviewJobId}`;
+    }
+
+    // Restore full job gcode in editor
+    if (activePreviewJobId) {
+      loadJobGcodeIntoEditor(activePreviewJobId, activeJobData ? activeJobData.name : null);
+    }
+
+    renderFixtureSlots();
+  }
+
+  function renderTimelineSlotHighlight(slot) {
+    const track = document.getElementById('timelineSlotHighlightTrack');
+    if (!track) return;
+    track.innerHTML = '';
+
+    if (!slot || !activeGeometryPoints || activeGeometryPoints.length === 0 || totalToolpathTime <= 0) {
+      return;
+    }
+
+    const sLine = (slot.start_line !== undefined) ? slot.start_line : 1;
+    const eLine = (slot.end_line !== undefined) ? slot.end_line : (activeJobData ? activeJobData.total_lines : 999999);
+
+    let startIdx = activeGeometryPoints.findIndex(pt => pt.line >= sLine);
+    if (startIdx < 0) startIdx = 0;
+
+    let endIdx = -1;
+    for (let i = activeGeometryPoints.length - 1; i >= 0; i--) {
+      if (activeGeometryPoints[i].line <= eLine) {
+        endIdx = i;
+        break;
+      }
+    }
+    if (endIdx < 0) endIdx = activeGeometryPoints.length - 1;
+
+    const startTime = (cumMoveTimes && cumMoveTimes[startIdx] !== undefined) ? cumMoveTimes[startIdx] : 0;
+    const endTime = (cumMoveTimes && cumMoveTimes[endIdx] !== undefined) ? cumMoveTimes[endIdx] : totalToolpathTime;
+
+    const startPct = Math.max(0, Math.min(100, (startTime / totalToolpathTime) * 100));
+    const endPct = Math.max(startPct, Math.min(100, (endTime / totalToolpathTime) * 100));
+    const widthPct = Math.max(1.5, endPct - startPct);
+
+    const slotIdx = fixtureSlots.indexOf(slot) + 1;
+    const slotLabel = `Slot ${slotIdx}: ${slot.op_name || slot.job_name || 'Op'}`;
+
+    track.innerHTML = `
+      <div class="timeline-slot-highlight-bar" style="left: ${startPct}%; width: ${widthPct}%;">
+        <div class="timeline-slot-highlight-label">
+          ${escapeHtml(slotLabel)}
+        </div>
+      </div>
+    `;
+
+    // Move scrubber to the start of this slot
+    onScrub(startTime);
+    const slider = document.getElementById('scrubberSlider');
+    if (slider) slider.value = startTime;
+  }
+
+  async function updateEditorForSelectedSlot(slot) {
+    if (!slot) return;
+    const slotIdx = fixtureSlots.indexOf(slot) + 1;
+
+    // Expand editor pane if collapsed so the user immediately sees it
+    const pane = document.getElementById('paneEditor');
+    if (pane && pane.classList.contains('collapsed')) {
+      pane.classList.remove('collapsed');
+      updateCollapseButtonsState();
+      setTimeout(() => GcodeViewer.resizeCanvas(), 200);
+    }
+
+    // Switch mobile tab if on smaller screen
+    if (window.innerWidth < 1100) {
+      switchMobileTab('editor');
+    }
+
+    const label = document.getElementById('editorTargetLabel');
+    if (label) {
+      label.innerHTML = `<span style="color: var(--accent); font-weight: 700;">Slot ${slotIdx}: ${escapeHtml(slot.job_name)}</span> <span style="color: var(--text-muted); font-size: 0.72rem;">(WCS: ${slot.wcs}${slot.start_line ? ', Lines ' + slot.start_line + '–' + slot.end_line : ''})</span>`;
+    }
+
+    // Show slot banner
+    const banner = document.getElementById('editorSlotBanner');
+    const bannerText = document.getElementById('editorSlotBannerText');
+    if (banner && bannerText) {
+      banner.style.display = 'flex';
+      bannerText.textContent = `🎯 Focusing Slot ${slotIdx}: ${slot.job_name} (Lines ${slot.start_line || 1} - ${slot.end_line || 'end'})`;
+    }
+
+    const btnToggle = document.getElementById('btnToggleSlotView');
+    if (btnToggle) {
+      btnToggle.textContent = isShowingSlotOnlyInEditor ? 'Show Full Job' : 'Show Slot Only';
+    }
+
+    const editor = document.getElementById('gcodeEditor');
+    if (!editor) return;
+
+    if (slot.custom_gcode) {
+      editor.value = slot.custom_gcode;
+      currentEditorGcode = slot.custom_gcode;
+      updateEditorStats();
+      const badge = document.getElementById('editorStatusBadge');
+      if (badge) {
+        badge.textContent = 'Sequence Override Active';
+        badge.style.background = 'rgba(16, 185, 129, 0.2)';
+        badge.style.color = 'var(--success)';
+      }
+      return;
+    }
+
+    if (isShowingSlotOnlyInEditor) {
+      // Fetch only this slot's sliced G-code
+      try {
+        let url = `/api/job/${slot.job_id}/gcode`;
+        if (slot.op_index !== undefined && slot.start_line !== undefined && slot.end_line !== undefined) {
+          url += `?op=${slot.op_index}&start=${slot.start_line}&end=${slot.end_line}`;
+        }
+        const res = await fetch(url);
+        const data = await res.json();
+        editor.value = data.gcode || '';
+        currentEditorGcode = editor.value;
+        updateEditorStats();
+        const badge = document.getElementById('editorStatusBadge');
+        if (badge) {
+          badge.textContent = 'Slot Sliced View';
+          badge.style.background = 'rgba(14, 165, 233, 0.2)';
+          badge.style.color = 'var(--accent)';
+        }
+      } catch (e) {
+        console.warn('Could not load sliced slot G-code', e);
+      }
+    } else {
+      // Ensure full job G-code is loaded, then select and scroll to slot's lines
+      if (!originalJobGcode || activeEditorSlotId !== slot.slot_id) {
+        try {
+          const res = await fetch(`/api/job/${slot.job_id}/gcode`);
+          const data = await res.json();
+          originalJobGcode = data.gcode || '';
+        } catch (e) {
+          originalJobGcode = '';
+        }
+      }
+      editor.value = originalJobGcode;
+      currentEditorGcode = originalJobGcode;
+      updateEditorStats();
+
+      const badge = document.getElementById('editorStatusBadge');
+      if (badge) {
+        badge.textContent = 'Original Source (Slot Highlighted)';
+        badge.style.background = 'rgba(14, 165, 233, 0.2)';
+        badge.style.color = 'var(--accent)';
+      }
+
+      // Calculate character range and scroll
+      if (slot.start_line && slot.end_line) {
+        const lines = editor.value.split('\n');
+        let charStart = 0;
+        let charEnd = editor.value.length;
+        let offset = 0;
+        for (let i = 0; i < lines.length; i++) {
+          const lnNum = i + 1;
+          if (lnNum === slot.start_line) {
+            charStart = offset;
+          }
+          offset += lines[i].length + 1;
+          if (lnNum === slot.end_line) {
+            charEnd = Math.min(editor.value.length, offset - 1);
+            break;
+          }
+        }
+        editor.focus();
+        editor.setSelectionRange(charStart, charEnd);
+
+        // Scroll so start_line is at top third of editor
+        const totalLines = lines.length || 1;
+        const lineFraction = Math.max(0, slot.start_line - 1) / totalLines;
+        editor.scrollTop = Math.max(0, lineFraction * editor.scrollHeight - 40);
+      }
+    }
+  }
+
+  function toggleSlotGcodeView() {
+    isShowingSlotOnlyInEditor = !isShowingSlotOnlyInEditor;
+    if (selectedSlotId) {
+      const slot = fixtureSlots.find(s => s.slot_id === selectedSlotId);
+      if (slot) updateEditorForSelectedSlot(slot);
+    }
   }
 
   function updateSlot(slotId, key, val) {
@@ -692,6 +983,22 @@ const App = (() => {
       renderTimelineToolMarkers();
       renderTimelinePartMarkers();
       renderTimelinePauseMarkers();
+
+      if (selectedSlotId) {
+        const selSlot = fixtureSlots.find(s => s.slot_id === selectedSlotId);
+        if (selSlot && selSlot.job_id === jobId) {
+          renderTimelineSlotHighlight(selSlot);
+          if (typeof GcodeViewer.setHighlightRange === 'function') {
+            GcodeViewer.setHighlightRange(selSlot.start_line, selSlot.end_line);
+          }
+        } else {
+          clearSelectedSlot();
+        }
+      } else {
+        if (typeof GcodeViewer.setHighlightRange === 'function') {
+          GcodeViewer.setHighlightRange(null, null);
+        }
+      }
 
       loadJobGcodeIntoEditor(jobId, data.name);
     } catch (e) {
@@ -1220,60 +1527,7 @@ const App = (() => {
   }
 
   async function openSlotInEditor(slotId) {
-    const slot = fixtureSlots.find(s => s.slot_id === slotId);
-    if (!slot) return;
-    activeEditorSlotId = slotId;
-
-    const label = document.getElementById('editorTargetLabel');
-    if (label) label.textContent = `Editing Slot: ${slot.job_name} (${slot.wcs})`;
-
-    if (slot.custom_gcode) {
-      currentEditorGcode = slot.custom_gcode;
-      const badge = document.getElementById('editorStatusBadge');
-      if (badge) {
-        badge.textContent = 'Sequence Override Active';
-        badge.style.background = 'rgba(16, 185, 129, 0.2)';
-        badge.style.color = 'var(--success)';
-      }
-    } else {
-      try {
-        let url = `/api/job/${slot.job_id}/gcode`;
-        if (slot.op_index !== undefined && slot.start_line !== undefined && slot.end_line !== undefined) {
-          url += `?op=${slot.op_index}&start=${slot.start_line}&end=${slot.end_line}`;
-        }
-        const res = await fetch(url);
-        const data = await res.json();
-        originalJobGcode = data.gcode || '';
-        currentEditorGcode = originalJobGcode;
-      } catch (e) {
-        currentEditorGcode = '';
-      }
-      const badge = document.getElementById('editorStatusBadge');
-      if (badge) {
-        badge.textContent = 'Original Source';
-        badge.style.background = 'rgba(148, 163, 184, 0.15)';
-        badge.style.color = 'var(--text-muted)';
-      }
-    }
-
-    const editor = document.getElementById('gcodeEditor');
-    if (editor) {
-      editor.value = currentEditorGcode;
-      updateEditorStats();
-    }
-
-    // Expand editor pane if collapsed
-    const pane = document.getElementById('paneEditor');
-    if (pane && pane.classList.contains('collapsed')) {
-      pane.classList.remove('collapsed');
-      updateCollapseButtonsState();
-      setTimeout(() => GcodeViewer.resizeCanvas(), 200);
-    }
-
-    // Switch mobile tab if on smaller screen
-    if (window.innerWidth < 1100) {
-      switchMobileTab('editor');
-    }
+    await selectSlot(slotId);
   }
 
   function onEditorInput() {
@@ -1595,6 +1849,46 @@ const App = (() => {
     }
   }
 
+  function checkAndDisplayPortWarning(port, errorStr) {
+    const warningBox = document.getElementById('diagPortWarning');
+    if (!warningBox) return;
+    const isPort80 = (
+      port === 80 ||
+      (config && config.controller_port === 80) ||
+      (errorStr && (errorStr.includes('200 OK') || errorStr.includes('uvicorn') || errorStr.includes('Port 80')))
+    );
+    warningBox.style.display = isPort80 ? 'block' : 'none';
+  }
+
+  async function fixPortTo8080() {
+    config.controller_port = 8080;
+    const portInput = document.getElementById('cfgPort');
+    if (portInput) portInput.value = 8080;
+    const diagPort = document.getElementById('diagTargetPort');
+    if (diagPort) diagPort.textContent = '8080';
+    const warningBox = document.getElementById('diagPortWarning');
+    if (warningBox) warningBox.style.display = 'none';
+
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...config,
+          controller_port: 8080,
+        })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        config = data.config;
+        showToast("Controller port updated to 8080 (RTS-X WebSocket)", "info");
+        await testControllerConnectionDetailed();
+      }
+    } catch (e) {
+      showToast("Error updating port: " + e.message, "danger");
+    }
+  }
+
   function openSyncDiagModal() {
     const modal = document.getElementById('syncDiagModal');
     if (modal) modal.style.display = 'flex';
@@ -1602,6 +1896,7 @@ const App = (() => {
     const portSpan = document.getElementById('diagTargetPort');
     if (hostSpan) hostSpan.textContent = config.controller_host || '192.168.1.150';
     if (portSpan) portSpan.textContent = config.controller_port || 8080;
+    checkAndDisplayPortWarning(config.controller_port, null);
     loadSyncLogs();
   }
 
@@ -1624,12 +1919,19 @@ const App = (() => {
           resultSpan.textContent = `✓ Online (${data.latency_ms} ms)`;
           resultSpan.style.color = 'var(--success)';
         }
+        if (data.port) {
+          config.controller_port = data.port;
+          const diagPort = document.getElementById('diagTargetPort');
+          if (diagPort) diagPort.textContent = data.port;
+        }
+        checkAndDisplayPortWarning(data.port, null);
         checkControllerStatus();
       } else {
         if (resultSpan) {
           resultSpan.textContent = `✕ Offline: ${data.error || 'Connection failed'}`;
           resultSpan.style.color = 'var(--danger)';
         }
+        checkAndDisplayPortWarning(data.port, data.error);
       }
     } catch (e) {
       if (resultSpan) {
@@ -1647,6 +1949,7 @@ const App = (() => {
       const res = await fetch('/api/sync/logs');
       const data = await res.json();
       const history = data.history || [];
+      checkAndDisplayPortWarning(data.port, history.length > 0 ? history[0].error : null);
       if (history.length === 0) {
         term.textContent = `Target: ws://${data.host}:${data.port}\nNo sync operations logged yet. Click "⚡ Upload to RTS-X" or "⚡ Retry Sync" to test.`;
         return;
@@ -1697,11 +2000,35 @@ const App = (() => {
   }
 
   async function saveSettings() {
+    let rawHost = document.getElementById('cfgHost').value.trim();
+    let port = parseInt(document.getElementById('cfgPort').value, 10) || 8080;
+
+    // Clean scheme and host:port if user entered ws:// or http:// or ip:port
+    if (rawHost.includes("://")) {
+      rawHost = rawHost.split("://")[1];
+    }
+    if (rawHost.includes("/")) {
+      rawHost = rawHost.split("/")[0];
+    }
+    if (rawHost.includes(":")) {
+      const parts = rawHost.split(":");
+      rawHost = parts[0];
+      const p = parseInt(parts[1], 10);
+      if (!isNaN(p) && p > 0) port = p;
+    }
+
+    if (port === 80) {
+      showToast("RTS-X WebSocket runs on 8080 (port 80 is HTTP UI only). Automatically corrected to 8080.", "warning");
+      port = 8080;
+      const portInput = document.getElementById('cfgPort');
+      if (portInput) portInput.value = 8080;
+    }
+
     const updated = {
       ...config,
       watched_dir: document.getElementById('cfgWatchedDir').value.trim(),
-      controller_host: document.getElementById('cfgHost').value.trim(),
-      controller_port: parseInt(document.getElementById('cfgPort').value, 10) || 8080,
+      controller_host: rawHost,
+      controller_port: port,
       stale_ttl_hours: parseFloat(document.getElementById('cfgTtl').value) || 24.0,
       auto_sync_idle_seconds: parseFloat(document.getElementById('cfgAutoSyncIdle').value) || 10.0,
       custom_epilogue: document.getElementById('cfgEpilogue').value,
@@ -1799,6 +2126,11 @@ const App = (() => {
     closeSyncDiagModal,
     testControllerConnectionDetailed,
     loadSyncLogs,
+    fixPortTo8080,
+    selectSlot,
+    clearSelectedSlot,
+    handleSlotCardClick,
+    toggleSlotGcodeView,
     dismissToast,
   };
 })();

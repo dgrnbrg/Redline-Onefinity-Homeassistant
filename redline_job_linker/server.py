@@ -196,10 +196,13 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/controller/status":
             try:
                 ok = _run_async(self.context.controller_mgr.test_connection())
+                if self.context.controller_mgr.port != self.context.config.controller_port:
+                    self.context.config.controller_port = self.context.controller_mgr.port
+                    save_config(self.context.config)
                 files = []
                 if ok:
                     files = _run_async(self.context.controller_mgr.get_workflow_files())
-                self._send_json({"connected": ok, "files": files, "folder": self.context.config.controller_subfolder})
+                self._send_json({"connected": ok, "files": files, "folder": self.context.config.controller_subfolder, "port": self.context.config.controller_port})
             except Exception as err:
                 self._send_json({"connected": False, "files": [], "error": str(err)})
             return
@@ -207,6 +210,9 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/controller/test":
             try:
                 diag = _run_async(self.context.controller_mgr.test_connection_detailed())
+                if self.context.controller_mgr.port != self.context.config.controller_port:
+                    self.context.config.controller_port = self.context.controller_mgr.port
+                    save_config(self.context.config)
                 self._send_json(diag)
             except Exception as err:
                 self._send_json({"ok": False, "error": str(err)})
@@ -339,6 +345,27 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             try:
+                # Normalize controller host and port
+                raw_host = str(body.get("controller_host", "")).strip()
+                if "://" in raw_host:
+                    raw_host = raw_host.split("://", 1)[1]
+                if "/" in raw_host:
+                    raw_host = raw_host.split("/", 1)[0]
+                if ":" in raw_host:
+                    h_parts = raw_host.split(":")
+                    raw_host = h_parts[0]
+                    try:
+                        body["controller_port"] = int(h_parts[1])
+                    except ValueError:
+                        pass
+                body["controller_host"] = raw_host
+
+                # If port was mistakenly set to 80 (HTTP UI port), RTS-X WebSocket runs on 8080
+                port_val = body.get("controller_port")
+                if port_val == 80:
+                    _LOGGER.info("Config controller_port was set to 80 (HTTP UI); defaulting RTS-X WebSocket port to 8080")
+                    body["controller_port"] = 8080
+
                 new_cfg = JobLinkerConfig.from_dict(body)
                 save_config(new_cfg)
                 old_watched_dir = self.context.config.watched_dir

@@ -12,6 +12,8 @@ const GcodeViewer = (() => {
   let currentExtents = { minX: 0, maxX: 100, minY: 0, maxY: 100, minZ: -5, maxZ: 5 };
   let toolheadBuffer = null;
   let shaderProgram = null;
+  let highlightStartLine = null;
+  let highlightEndLine = null;
 
   // Camera state
   let rotX = 45; // degrees
@@ -123,6 +125,73 @@ const GcodeViewer = (() => {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(coneVerts), gl.STATIC_DRAW);
   }
 
+  function _getSegmentBaseColor(prev, p) {
+    let r = 0.05, g = 0.65, b = 0.95; // Blue-cyan for standard linear cutting G1
+    if (p.type === 'rapid') {
+      const isOpChange = Math.max(prev.z || 0, p.z || 0) >= currentSafeZ;
+      if (isOpChange) {
+        r = 0.98; g = 0.75; b = 0.14; // Amber/gold for op change safe Z retracts
+      } else {
+        r = 0.95; g = 0.25; b = 0.25; // Red for intra-op stepover rapids
+      }
+    } else if (p.type === 'arc') {
+      r = 0.1; g = 0.85; b = 0.35; // Green for arcs G2/G3
+    }
+    return [r, g, b];
+  }
+
+  function applyColors() {
+    if (!rawVertices || !gl || !lineBuffer || points.length <= 1) return;
+
+    const hasHighlight = (highlightStartLine !== null && highlightEndLine !== null);
+
+    for (let i = 1; i < points.length; i++) {
+      const p = points[i];
+      const prev = points[i - 1];
+      let [r, g, b] = _getSegmentBaseColor(prev, p);
+
+      if (hasHighlight) {
+        const inSlot = (p.line >= highlightStartLine && p.line <= highlightEndLine);
+        if (inSlot) {
+          // Vivid, bright, high-contrast glow for the selected slot
+          if (p.type === 'linear') {
+            r = 0.15; g = 0.88; b = 1.0; // Glowing neon cyan
+          } else if (p.type === 'arc') {
+            r = 0.2; g = 1.0; b = 0.45;  // Neon green
+          } else if (p.type === 'rapid') {
+            const isOpChange = Math.max(prev.z || 0, p.z || 0) >= currentSafeZ;
+            if (isOpChange) {
+              r = 1.0; g = 0.85; b = 0.2; // Vivid gold
+            } else {
+              r = 1.0; g = 0.3; b = 0.3;  // Bright red
+            }
+          }
+        } else {
+          // Dim / ghost background toolpaths
+          r = 0.12; g = 0.18; b = 0.26;
+        }
+      }
+
+      const baseIdx = (i - 1) * 12;
+      rawVertices[baseIdx + 3] = r;
+      rawVertices[baseIdx + 4] = g;
+      rawVertices[baseIdx + 5] = b;
+
+      rawVertices[baseIdx + 9] = r;
+      rawVertices[baseIdx + 10] = g;
+      rawVertices[baseIdx + 11] = b;
+    }
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, rawVertices, gl.STATIC_DRAW);
+  }
+
+  function setHighlightRange(startLine, endLine) {
+    highlightStartLine = (typeof startLine === 'number' && !isNaN(startLine)) ? startLine : null;
+    highlightEndLine = (typeof endLine === 'number' && !isNaN(endLine)) ? endLine : null;
+    applyColors();
+  }
+
   function loadGeometry(pointList, safeZThreshold) {
     points = pointList || [];
     cursorIndex = 0;
@@ -151,16 +220,16 @@ const GcodeViewer = (() => {
 
       if (i > 0) {
         const prev = points[i - 1];
-        let r = 0.05, g = 0.65, b = 0.95; // Blue-cyan for standard linear cutting G1
-        if (p.type === 'rapid') {
-          const isOpChange = Math.max(prev.z || 0, p.z || 0) >= currentSafeZ;
-          if (isOpChange) {
-            r = 0.98; g = 0.75; b = 0.14; // Amber/gold for op change safe Z retracts
+        let [r, g, b] = _getSegmentBaseColor(prev, p);
+        if (highlightStartLine !== null && highlightEndLine !== null) {
+          const inSlot = (p.line >= highlightStartLine && p.line <= highlightEndLine);
+          if (inSlot) {
+            if (p.type === 'linear') { r = 0.15; g = 0.88; b = 1.0; }
+            else if (p.type === 'arc') { r = 0.2; g = 1.0; b = 0.45; }
+            else if (p.type === 'rapid') { r = 1.0; g = 0.85; b = 0.2; }
           } else {
-            r = 0.95; g = 0.25; b = 0.25; // Red for intra-op stepover rapids
+            r = 0.12; g = 0.18; b = 0.26;
           }
-        } else if (p.type === 'arc') {
-          r = 0.1; g = 0.85; b = 0.35; // Green for arcs G2/G3
         }
 
         verts.push(prev.x, prev.y, prev.z, r, g, b);
@@ -196,30 +265,7 @@ const GcodeViewer = (() => {
     if (typeof newThreshold === 'number') {
       currentSafeZ = newThreshold;
     }
-    if (!rawVertices || !gl || !lineBuffer || points.length <= 1) return;
-
-    for (let i = 1; i < points.length; i++) {
-      const p = points[i];
-      if (p.type === 'rapid') {
-        const prev = points[i - 1];
-        const isOpChange = Math.max(prev.z || 0, p.z || 0) >= currentSafeZ;
-        const r = isOpChange ? 0.98 : 0.95;
-        const g = isOpChange ? 0.75 : 0.25;
-        const b = isOpChange ? 0.14 : 0.25;
-
-        const baseIdx = (i - 1) * 12;
-        rawVertices[baseIdx + 3] = r;
-        rawVertices[baseIdx + 4] = g;
-        rawVertices[baseIdx + 5] = b;
-
-        rawVertices[baseIdx + 9] = r;
-        rawVertices[baseIdx + 10] = g;
-        rawVertices[baseIdx + 11] = b;
-      }
-    }
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, rawVertices, gl.STATIC_DRAW);
+    applyColors();
   }
 
   function getExtents() {
@@ -461,6 +507,7 @@ const GcodeViewer = (() => {
     resetCamera,
     setView,
     updateSafeZThreshold,
+    setHighlightRange,
     getExtents,
     resizeCanvas,
   };

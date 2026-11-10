@@ -23,6 +23,17 @@ class SimpleWebSocketClient:
     """Minimal RFC 6455 WebSocket client using asyncio.open_connection."""
 
     def __init__(self, host: str, port: int = 8080, timeout: float = 5.0) -> None:
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        if "/" in host:
+            host = host.split("/", 1)[0]
+        if ":" in host:
+            parts = host.split(":")
+            host = parts[0]
+            try:
+                port = int(parts[1])
+            except ValueError:
+                pass
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -31,12 +42,13 @@ class SimpleWebSocketClient:
         self.connected = False
         self.last_error: str | None = None
 
-    async def connect(self) -> bool:
-        """Perform HTTP Upgrade handshake to establish WebSocket connection."""
-        self.last_error = None
+    async def _attempt_handshake(self, host: str, port: int) -> tuple[bool, str | None, bytes]:
+        """Attempt socket connection and WebSocket HTTP 101 Upgrade handshake."""
+        reader = None
+        writer = None
         try:
-            self.reader, self.writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port),
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
                 timeout=self.timeout,
             )
 
@@ -46,57 +58,102 @@ class SimpleWebSocketClient:
 
             handshake = (
                 f"GET / HTTP/1.1\r\n"
-                f"Host: {self.host}:{self.port}\r\n"
+                f"Host: {host}:{port}\r\n"
                 f"Upgrade: websocket\r\n"
                 f"Connection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {ws_key}\r\n"
                 f"Sec-WebSocket-Version: 13\r\n\r\n"
             )
 
-            self.writer.write(handshake.encode("ascii"))
-            await self.writer.drain()
+            writer.write(handshake.encode("ascii"))
+            await writer.drain()
 
             # Read response header
             header_data = b""
             while b"\r\n\r\n" not in header_data:
-                chunk = await asyncio.wait_for(self.reader.read(1024), timeout=self.timeout)
+                chunk = await asyncio.wait_for(reader.read(1024), timeout=self.timeout)
                 if not chunk:
                     break
                 header_data += chunk
 
-            if b"101 Switching Protocols" not in header_data:
-                self.last_error = f"Handshake rejected: {header_data.decode('utf-8', 'ignore').strip() or 'No 101 status'}"
+            if b"101 Switching Protocols" in header_data:
+                self.reader = reader
+                self.writer = writer
+                self.connected = True
+                return True, None, header_data
+
+            # Handshake was rejected (e.g. 200 OK from HTTP server)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return False, "Handshake rejected (no 101 status)", header_data
+        except asyncio.TimeoutError:
+            if writer:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+            return False, f"Connection to {host}:{port} timed out after {self.timeout}s", b""
+        except ConnectionRefusedError:
+            return False, f"Connection to {host}:{port} refused (controller service offline or port blocked)", b""
+        except socket.gaierror as err:
+            return False, f"Hostname '{host}' could not be resolved: {err}", b""
+        except OSError as err:
+            return False, f"Network OS error connecting to {host}:{port}: {err}", b""
+        except Exception as err:
+            return False, f"Failed to connect to {host}:{port}: {err}", b""
+
+    async def connect(self) -> bool:
+        """Perform HTTP Upgrade handshake to establish WebSocket connection, with automatic fallback from HTTP port 80 to 8080."""
+        self.last_error = None
+        ok, err, header_data = await self._attempt_handshake(self.host, self.port)
+        if ok:
+            return True
+
+        # Check if the target was the HTTP web UI (port 80/8000 or uvicorn / flutter HTML returned)
+        is_http_ui = (
+            self.port in (80, 8000)
+            or b"uvicorn" in header_data.lower()
+            or b"flutter" in header_data.lower()
+            or b"200 OK" in header_data
+            or b"text/html" in header_data.lower()
+        )
+
+        if is_http_ui and self.port != 8080:
+            _LOGGER.info(
+                "Port %d responded with HTTP web content (Uvicorn/Flutter). "
+                "Attempting automatic fallback to RTS-X WebSocket server on port 8080...",
+                self.port,
+            )
+            fb_ok, fb_err, _ = await self._attempt_handshake(self.host, 8080)
+            if fb_ok:
+                _LOGGER.info(
+                    "Successfully connected to RTS-X WebSocket server on port 8080 "
+                    "(auto-recovered from HTTP port %d)!",
+                    self.port,
+                )
+                self.port = 8080
+                return True
+            else:
+                self.last_error = (
+                    f"Handshake rejected on port {self.port}: Port {self.port} is the RTS-X HTTP web UI (Uvicorn/Flutter), not the WebSocket server. "
+                    f"Automatic fallback to RTS-X WebSocket port 8080 failed ({fb_err}). "
+                    f"Please verify RTS-X WebSocket server is running on port 8080."
+                )
                 _LOGGER.warning(self.last_error)
-                await self.close()
                 return False
 
-            self.connected = True
-            return True
-        except asyncio.TimeoutError:
-            self.last_error = f"Connection to {self.host}:{self.port} timed out after {self.timeout}s"
-            _LOGGER.warning(self.last_error)
-            await self.close()
-            return False
-        except ConnectionRefusedError:
-            self.last_error = f"Connection to {self.host}:{self.port} refused (controller service offline or port blocked)"
-            _LOGGER.warning(self.last_error)
-            await self.close()
-            return False
-        except socket.gaierror as err:
-            self.last_error = f"Hostname '{self.host}' could not be resolved: {err}"
-            _LOGGER.warning(self.last_error)
-            await self.close()
-            return False
-        except OSError as err:
-            self.last_error = f"Network OS error connecting to {self.host}:{self.port}: {err}"
-            _LOGGER.warning(self.last_error)
-            await self.close()
-            return False
-        except Exception as err:
-            self.last_error = f"Failed to connect to {self.host}:{self.port}: {err}"
-            _LOGGER.warning(self.last_error)
-            await self.close()
-            return False
+        # Extract only the HTTP status line instead of dumping thousands of bytes of HTML
+        if header_data:
+            first_line = header_data.split(b"\r\n")[0].decode("latin-1", "ignore").strip()
+            self.last_error = f"Handshake rejected: {first_line or 'Non-WebSocket response'}"
+        else:
+            self.last_error = err or f"Could not connect to {self.host}:{self.port}"
+
+        _LOGGER.warning(self.last_error)
+        return False
 
     async def send_json(self, payload: dict[str, Any]) -> bool:
         """Send a JSON text frame with client masking."""
@@ -193,6 +250,17 @@ class ControllerWorkflowManager:
     """High-level client managing gcode/workflow/, TTL pruning, and chunked uploads."""
 
     def __init__(self, host: str = "192.168.1.150", port: int = 8080) -> None:
+        if "://" in host:
+            host = host.split("://", 1)[1]
+        if "/" in host:
+            host = host.split("/", 1)[0]
+        if ":" in host:
+            parts = host.split(":")
+            host = parts[0]
+            try:
+                port = int(parts[1])
+            except ValueError:
+                pass
         self.host = host
         self.port = port
         self.workflow_folder = "gcode/workflow"
@@ -201,6 +269,8 @@ class ControllerWorkflowManager:
         """Verify WebSocket connectivity to the controller."""
         client = SimpleWebSocketClient(self.host, self.port, timeout=2.5)
         ok = await client.connect()
+        if client.port != self.port:
+            self.port = client.port
         await client.close()
         return ok
 
@@ -211,6 +281,8 @@ class ControllerWorkflowManager:
         ok = await client.connect()
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
         err = client.last_error if not ok else None
+        if client.port != self.port:
+            self.port = client.port
         await client.close()
         return {
             "ok": ok,
@@ -253,6 +325,11 @@ class ControllerWorkflowManager:
                 "logs": logs,
                 "duration_sec": round(time.perf_counter() - t_start, 2),
             }
+
+        # If client auto-switched to port 8080 (due to port 80 HTTP UI fallback):
+        if client.port != self.port:
+            log(f"Auto-switched from port {self.port} to RTS-X WebSocket port {client.port}")
+            self.port = client.port
 
         uploaded: list[str] = []
         replaced: list[str] = []
