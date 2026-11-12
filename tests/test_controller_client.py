@@ -50,6 +50,7 @@ class MockWSClient:
         self.port = port
         self.timeout = timeout
         self.last_error = None
+        self.connected = True
         self.tree = tree or {}
         self._queue: list[dict] = []
 
@@ -221,6 +222,34 @@ class TestControllerClient(unittest.TestCase):
         self.assertEqual(res_empty["verified"], [])
         self.assertEqual(res_empty["missing_files"], ["Bracket.ngc"])
         self.assertIn("files missing on controller", res_empty["error"])
+
+    def test_execute_sync_exact_byte_verification_bytes_input(self):
+        raw_bytes = b"G0 X0 Y0 Z5\r\nM30\r\n"
+        expected_len = len(raw_bytes)  # 18 bytes
+
+        tree = {
+            "name": "gcode",
+            "children": [
+                {
+                    "name": "workflow",
+                    "children": [
+                        {"name": "Part.ngc", "size": expected_len, "modified": "2026-11-12 12:00:00"}
+                    ],
+                }
+            ],
+        }
+
+        async def noop_sleep(*a, **kw):
+            pass
+
+        mgr = ControllerWorkflowManager(host="127.0.0.1", port=8080)
+        with patch("redline_job_linker.controller_client.SimpleWebSocketClient", side_effect=lambda *a, **kw: MockWSClient(*a, tree=tree, **kw)):
+            with patch("asyncio.sleep", side_effect=noop_sleep):
+                res = run_coro(mgr.execute_sync(files={"Part.ngc": raw_bytes}))
+
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["verified"], ["Part.ngc"])
+        self.assertEqual(res["uploaded"], ["Part.ngc"])
 
 
 if __name__ == "__main__":

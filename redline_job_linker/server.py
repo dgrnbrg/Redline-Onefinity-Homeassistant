@@ -146,6 +146,10 @@ class JobLinkerServerContext:
                 except OSError:
                     continue
 
+                # Ignore 0-byte or empty in-progress files
+                if size == 0:
+                    continue
+
                 # Expiry logic: skip files on disk that exceed stale_ttl_hours
                 if max_age_sec > 0 and (now_sec - mtime) > max_age_sec:
                     _LOGGER.debug(
@@ -159,11 +163,14 @@ class JobLinkerServerContext:
                 last_stat = self._staged_file_state.get(path)
                 if last_stat is None or last_stat != (mtime, size):
                     try:
-                        with open(path, "r", encoding="utf-8", errors="replace") as f:
-                            files_to_upload[sf.filename] = f.read()
-                        pending_stats[path] = (mtime, size)
-                    except OSError as err:
-                        _LOGGER.warning("Could not read staged file %s: %s", path, err)
+                        with open(path, "rb") as f:
+                            raw_bytes = f.read()
+                        if not raw_bytes or len(raw_bytes) == 0:
+                            continue
+                        files_to_upload[sf.filename] = raw_bytes
+                        pending_stats[path] = (mtime, len(raw_bytes))
+                    except (PermissionError, OSError) as err:
+                        _LOGGER.debug("File %s not yet ready or locked for reading: %s", path, err)
 
         # Prune state for deleted files
         for dead_path in list(self._staged_file_state.keys()):
@@ -184,8 +191,8 @@ class JobLinkerServerContext:
                 )
             )
 
-        if res and res.get("ok"):
-            verified_set = set(res.get("verified", res.get("uploaded", [])))
+        if res:
+            verified_set = set(res.get("verified", []))
             for path, stat_tuple in pending_stats.items():
                 if os.path.basename(path) in verified_set:
                     self._staged_file_state[path] = stat_tuple

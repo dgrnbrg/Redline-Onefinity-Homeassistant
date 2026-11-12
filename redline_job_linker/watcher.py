@@ -310,12 +310,13 @@ class DirectoryWatcher:
 
     def _check_pending_debounce(self) -> None:
         with self._lock:
-            pending_items = list(self._pending_debounce.keys())
+            pending_items = list(self._pending_debounce.items())
         if not pending_items:
             return
 
         changed = False
-        for full_path in pending_items:
+        now = time.time()
+        for full_path, first_seen in pending_items:
             if not os.path.exists(full_path):
                 with self._lock:
                     self._pending_debounce.pop(full_path, None)
@@ -328,6 +329,18 @@ class DirectoryWatcher:
                 stat = os.stat(full_path)
                 cur_size = stat.st_size
                 cur_mtime = stat.st_mtime
+
+                # CAM write in progress: ignore 0-byte initial creates or incomplete debounce window
+                if cur_size == 0 or (now - first_seen) < self.debounce_seconds:
+                    continue
+
+                # Verify file is closed and readable by attempting a non-exclusive read
+                try:
+                    with open(full_path, "rb") as test_f:
+                        test_f.read(1024)
+                except (PermissionError, OSError):
+                    # Still locked or flushing by CAM software; wait for next cycle
+                    continue
 
                 with self._lock:
                     if full_path not in self._files:
@@ -353,6 +366,7 @@ class DirectoryWatcher:
                             st.stable_count = 0
                             if st.is_ready:
                                 st.is_ready = False
+                            self._pending_debounce[full_path] = now
             except OSError:
                 continue
 
@@ -395,6 +409,15 @@ class DirectoryWatcher:
                         stat = os.stat(full_path)
                         cur_size = stat.st_size
                         cur_mtime = stat.st_mtime
+
+                        # Skip empty files or files locked during write
+                        if cur_size == 0:
+                            continue
+                        try:
+                            with open(full_path, "rb") as test_f:
+                                test_f.read(1024)
+                        except (PermissionError, OSError):
+                            continue
 
                         with self._lock:
                             if full_path not in self._files:

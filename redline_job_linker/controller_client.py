@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime
-import hashlib
 import json
 import logging
 import os
@@ -13,10 +12,11 @@ import socket
 import struct
 import time
 from typing import Any
+import zlib
 
 _LOGGER = logging.getLogger(__name__)
 
-CHUNK_SIZE = 16 * 1024  # 16 KB raw chunk -> ~22 KB Base64 frame (well within WebSocket frame limits)
+CHUNK_SIZE = 64 * 1024  # 64 KB raw chunk matching RTS-X Flutter web client
 
 
 class SimpleWebSocketClient:
@@ -41,6 +41,8 @@ class SimpleWebSocketClient:
         self.writer: asyncio.StreamWriter | None = None
         self.connected = False
         self.last_error: str | None = None
+        self.msg_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._rx_task: asyncio.Task[None] | None = None
 
     async def _attempt_handshake(self, host: str, port: int) -> tuple[bool, str | None, bytes]:
         """Attempt socket connection and WebSocket HTTP 101 Upgrade handshake."""
@@ -80,6 +82,8 @@ class SimpleWebSocketClient:
                 self.reader = reader
                 self.writer = writer
                 self.connected = True
+                self.msg_queue = asyncio.Queue()
+                self._rx_task = asyncio.create_task(self._reader_loop())
                 return True, None, header_data
 
             # Handshake was rejected (e.g. 200 OK from HTTP server)
@@ -170,55 +174,95 @@ class SimpleWebSocketClient:
             self.connected = False
             return False
 
+    async def _reader_loop(self) -> None:
+        """Continuously read WebSocket frames, discard camera streams, and enqueue control/data frames."""
+        try:
+            while self.connected and self.reader:
+                raw = await self._read_frame()
+                if raw is None:
+                    break
+                try:
+                    msg = json.loads(raw.decode("utf-8", errors="replace"))
+                    if isinstance(msg, dict):
+                        # Discard high-frequency camera frames (approx 1 MB/s) to keep socket buffers drained
+                        if "image_data" not in msg:
+                            await self.msg_queue.put(msg)
+                    else:
+                        await self.msg_queue.put(msg)
+                except Exception:
+                    pass
+        except Exception as err:
+            _LOGGER.debug("WS reader loop ended: %s", err)
+        finally:
+            self.connected = False
+
     async def read_json(self, timeout: float = 3.0) -> dict[str, Any] | None:
-        """Read next incoming text frame and decode JSON."""
-        if not self.connected or not self.reader:
+        """Read next non-camera JSON message from incoming queue."""
+        if not self.connected and self.msg_queue.empty():
             return None
         try:
-            raw = await asyncio.wait_for(self._read_frame(), timeout=timeout)
-            if raw is None:
-                return None
-            return json.loads(raw.decode("utf-8", errors="replace"))
+            return await asyncio.wait_for(self.msg_queue.get(), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return None
         except Exception as err:
-            _LOGGER.debug("Error reading WS message: %s", err)
+            _LOGGER.debug("Error reading WS message from queue: %s", err)
             return None
 
     async def drain_incoming(self, timeout: float = 0.05) -> list[dict[str, Any]]:
-        """Read and return any incoming frames currently waiting without blocking indefinitely."""
+        """Drain queued incoming frames without blocking the underlying socket."""
         messages: list[dict[str, Any]] = []
-        while self.connected:
+        while not self.msg_queue.empty():
             try:
-                msg = await self.read_json(timeout=timeout)
-                if msg is None:
-                    break
-                messages.append(msg)
-            except Exception:
+                messages.append(self.msg_queue.get_nowait())
+            except asyncio.QueueEmpty:
                 break
+        if timeout > 0:
+            t_end = time.perf_counter() + timeout
+            while time.perf_counter() < t_end and self.connected:
+                rem = t_end - time.perf_counter()
+                if rem <= 0:
+                    break
+                try:
+                    msg = await asyncio.wait_for(self.msg_queue.get(), timeout=min(rem, 0.05))
+                    messages.append(msg)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    break
+                except Exception:
+                    break
         return messages
 
     async def _read_frame(self) -> bytes | None:
         if not self.reader:
             return None
-        head = await self.reader.readexactly(2)
+        try:
+            head = await self.reader.readexactly(2)
+        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
+            self.connected = False
+            return None
+
         b1, b2 = head[0], head[1]
         opcode = b1 & 0x0F
         is_masked = bool(b2 & 0x80)
         payload_len = b2 & 0x7F
 
-        if payload_len == 126:
-            ext = await self.reader.readexactly(2)
-            payload_len = struct.unpack("!H", ext)[0]
-        elif payload_len == 127:
-            ext = await self.reader.readexactly(8)
-            payload_len = struct.unpack("!Q", ext)[0]
+        try:
+            if payload_len == 126:
+                ext = await self.reader.readexactly(2)
+                payload_len = struct.unpack("!H", ext)[0]
+            elif payload_len == 127:
+                ext = await self.reader.readexactly(8)
+                payload_len = struct.unpack("!Q", ext)[0]
 
-        mask_key = None
-        if is_masked:
-            mask_key = await self.reader.readexactly(4)
+            mask_key = None
+            if is_masked:
+                mask_key = await self.reader.readexactly(4)
 
-        payload = await self.reader.readexactly(payload_len)
-        if is_masked and mask_key:
-            payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+            payload = await self.reader.readexactly(payload_len)
+            if is_masked and mask_key:
+                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
+            self.connected = False
+            return None
 
         if opcode == 0x8:  # Close frame
             self.connected = False
@@ -226,8 +270,11 @@ class SimpleWebSocketClient:
         if opcode == 0x9:  # Ping frame
             pong = self._build_frame(payload, opcode=0xA)
             if self.writer:
-                self.writer.write(pong)
-                await self.writer.drain()
+                try:
+                    self.writer.write(pong)
+                    await self.writer.drain()
+                except Exception:
+                    self.connected = False
             return await self._read_frame()
 
         return payload
@@ -249,6 +296,9 @@ class SimpleWebSocketClient:
 
     async def close(self) -> None:
         self.connected = False
+        if self._rx_task:
+            self._rx_task.cancel()
+            self._rx_task = None
         if self.writer:
             try:
                 self.writer.close()
@@ -307,7 +357,7 @@ class ControllerWorkflowManager:
 
     async def execute_sync(
         self,
-        files: dict[str, str],
+        files: dict[str, str | bytes],
         workflow_key: str = "",
         ttl_hours: float = 24.0,
         subfolder: str = "gcode/workflow",
@@ -358,20 +408,8 @@ class ControllerWorkflowManager:
 
             # 2. Query file list once
             log("Querying file list from controller...")
-            await client.send_json({"command": "refreshFileList"})
-            existing_files: list[dict[str, Any]] = []
-            for _ in range(5):
-                msg = await client.read_json(timeout=1.5)
-                if not msg:
-                    break
-                if msg.get("name") == "gcode" and "children" in msg:
-                    sub_name = subfolder.split("/")[-1] if "/" in subfolder else subfolder
-                    for ch in msg.get("children", []):
-                        if ch.get("name") == sub_name and "children" in ch:
-                            existing_files = ch.get("children", [])
-                            break
-                    break
-
+            existing_dict = await self._query_file_tree(client, subfolder, timeout=3.0)
+            existing_files = [{"name": n, "size": s} for n, s in existing_dict.items()]
             log(f"Found {len(existing_files)} existing file(s) in '{subfolder}'")
 
             # 3. Prune stale files (TTL)
@@ -421,81 +459,108 @@ class ControllerWorkflowManager:
             # 5. Upload newly generated file(s)
             for fname, content in files.items():
                 dest_path = f"{subfolder}/{fname}"
-                raw_bytes = content.encode("utf-8")
+                raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8")
                 total_size = len(raw_bytes)
-                checksum = hashlib.md5(raw_bytes).hexdigest()
-                log(f"Uploading '{fname}' ({total_size} bytes, {total_size // CHUNK_SIZE + 1} chunks)...")
+                crc = zlib.crc32(raw_bytes)
+                checksum = f"{crc:x}"
+                log(f"Uploading '{fname}' ({total_size} bytes, crc={checksum}, {(total_size - 1) // CHUNK_SIZE + 1} chunks)...")
 
-                # Drain any pending incoming messages before initiating upload
-                await drain_and_log("(pre-upload)")
+                file_uploaded = False
+                for attempt in range(2):
+                    if attempt > 0:
+                        log(f"Retrying upload for '{fname}' (attempt {attempt + 1}/2)...")
+                        await client.close()
+                        await asyncio.sleep(0.1)
 
-                # startUpload: send both fileName and filePath plus aliases to guarantee backend schema match
-                start_payload = {
-                    "command": "startUpload",
-                    "fileName": dest_path,
-                    "filePath": dest_path,
-                    "destPath": dest_path,
-                    "folderPath": subfolder,
-                    "name": fname,
-                    "totalSize": total_size,
-                    "total_size": total_size,
-                    "size": total_size,
-                    "checksum": checksum,
-                }
-                if not await client.send_json(start_payload):
-                    log(f"Failed to send startUpload for '{fname}' (connection lost)")
-                    continue
+                    # Reconnect if connection was lost
+                    if not client.connected:
+                        log(f"Reconnecting to controller WebSocket for '{fname}'...")
+                        if not await client.connect():
+                            log(f"Failed to reconnect to controller for '{fname}'")
+                            continue
 
-                await asyncio.sleep(0.05)
-                await drain_and_log("(after startUpload)")
+                    # Drain any pending incoming messages before initiating upload
+                    await drain_and_log("(pre-upload)")
 
-                offset = 0
-                upload_failed = False
-                while offset < total_size:
-                    chunk = raw_bytes[offset : offset + CHUNK_SIZE]
-                    chunk_b64 = base64.b64encode(chunk).decode("ascii")
-                    chunk_payload = {
-                        "command": "uploadChunk",
+                    # startUpload: RTS-X command with fileName, totalSize, and CRC32 hex checksum
+                    start_payload = {
+                        "command": "startUpload",
                         "fileName": dest_path,
-                        "filePath": dest_path,
-                        "chunkData": chunk_b64,
-                        "offset": offset,
+                        "totalSize": total_size,
+                        "checksum": checksum,
                     }
-                    if not await client.send_json(chunk_payload):
-                        log(f"Failed to send uploadChunk at offset {offset} for '{fname}' (connection lost)")
-                        upload_failed = True
-                        break
+                    if not await client.send_json(start_payload):
+                        log(f"Failed to send startUpload for '{fname}' (connection lost)")
+                        continue
 
-                    offset += len(chunk)
-                    await asyncio.sleep(0.005)  # 5ms pacing between chunks
-                    if offset % (CHUNK_SIZE * 4) == 0:
-                        await drain_and_log("(during upload)")
+                    await asyncio.sleep(0.05)
+                    incoming_start = await drain_and_log("(after startUpload)")
+                    if any(isinstance(m, dict) and m.get("command") == "uploadError" for m in incoming_start):
+                        log(f"Controller rejected startUpload for '{fname}'")
+                        continue
 
-                if upload_failed:
-                    continue
+                    offset = 0
+                    upload_failed = False
+                    while offset < total_size:
+                        chunk = raw_bytes[offset : offset + CHUNK_SIZE]
+                        chunk_b64 = base64.b64encode(chunk).decode("ascii")
+                        chunk_payload = {
+                            "command": "uploadChunk",
+                            "fileName": dest_path,
+                            "chunkData": chunk_b64,
+                            "offset": offset,
+                        }
+                        if not await client.send_json(chunk_payload):
+                            log(f"Failed to send uploadChunk at offset {offset} for '{fname}' (connection lost)")
+                            upload_failed = True
+                            break
 
-                # finishUpload: send both fileName and filePath plus aliases to ensure file is committed
-                finish_payload = {
-                    "command": "finishUpload",
-                    "fileName": dest_path,
-                    "filePath": dest_path,
-                    "destPath": dest_path,
-                    "folderPath": subfolder,
-                    "name": fname,
-                }
-                if not await client.send_json(finish_payload):
-                    log(f"Failed to send finishUpload for '{fname}' (connection lost)")
-                    continue
+                        offset += len(chunk)
+                        await asyncio.sleep(0.005)  # 5ms pacing between chunks
+                        if offset % (CHUNK_SIZE * 4) == 0:
+                            incoming_chk = await drain_and_log("(during upload)")
+                            if any(isinstance(m, dict) and m.get("command") == "uploadError" for m in incoming_chk):
+                                log(f"Controller reported uploadError during chunk upload for '{fname}'")
+                                upload_failed = True
+                                break
 
-                # Wait for controller filesystem sync/flush and drain server messages
-                await asyncio.sleep(0.2)
-                await drain_and_log(f"(after finishUpload for '{fname}')")
-                uploaded.append(fname)
-                log(f"Finished transmitting '{fname}'")
+                    if upload_failed:
+                        continue
+
+                    # finishUpload: RTS-X command with filePath
+                    finish_payload = {
+                        "command": "finishUpload",
+                        "filePath": dest_path,
+                    }
+                    if not await client.send_json(finish_payload):
+                        log(f"Failed to send finishUpload for '{fname}' (connection lost)")
+                        continue
+
+                    # Wait for controller filesystem sync/flush and drain server messages
+                    await asyncio.sleep(0.2)
+                    incoming_finish = await drain_and_log(f"(after finishUpload for '{fname}')")
+                    err_msg_ctrl = next(
+                        (m.get("message") for m in incoming_finish if isinstance(m, dict) and m.get("command") == "uploadError"),
+                        None,
+                    )
+                    if err_msg_ctrl:
+                        log(f"Controller rejected '{fname}': {err_msg_ctrl}")
+                        continue
+
+                    uploaded.append(fname)
+                    log(f"Finished transmitting '{fname}'")
+                    file_uploaded = True
+                    break
+
+                if not file_uploaded:
+                    log(f"Failed to upload '{fname}' after retries")
 
             # 6. Post-upload verification and controller UI refresh
             log("Querying controller to verify file(s) and refresh controller UI file list...")
-            expected_sizes = {fname: len(content.encode("utf-8")) for fname, content in files.items()}
+            expected_sizes = {
+                fname: (len(content) if isinstance(content, bytes) else len(content.encode("utf-8")))
+                for fname, content in files.items()
+            }
             verified_files: list[str] = []
             size_mismatches: list[tuple[str, int, int]] = []
             missing_files: list[str] = []
@@ -503,21 +568,7 @@ class ControllerWorkflowManager:
             # Poll refreshFileList with retries until all files reach exact expected size or timeout
             on_ctrl: dict[str, int] = {}
             for attempt in range(8):
-                await client.send_json({"command": "refreshFileList"})
-                await asyncio.sleep(0.15)
-                on_ctrl = {}
-                for _ in range(5):
-                    msg = await client.read_json(timeout=0.8)
-                    if not msg:
-                        break
-                    if msg.get("name") == "gcode" and "children" in msg:
-                        sub_name = subfolder.split("/")[-1] if "/" in subfolder else subfolder
-                        for ch in msg.get("children", []):
-                            if ch.get("name") == sub_name and "children" in ch:
-                                on_ctrl = {f.get("name"): int(f.get("size", 0)) for f in ch.get("children", [])}
-                                break
-                        break
-
+                on_ctrl = await self._query_file_tree(client, subfolder, timeout=2.0)
                 all_matched = True
                 for up_name in uploaded:
                     exp_sz = expected_sizes.get(up_name, 0)
@@ -527,6 +578,7 @@ class ControllerWorkflowManager:
 
                 if all_matched and on_ctrl:
                     break
+                await asyncio.sleep(0.25)
 
             # Evaluate exact size matches and missing files
             for up_name in uploaded:
@@ -598,6 +650,28 @@ class ControllerWorkflowManager:
         finally:
             await client.close()
 
+    async def _query_file_tree(
+        self, client: SimpleWebSocketClient, subfolder: str, timeout: float = 3.0
+    ) -> dict[str, int]:
+        """Send refreshFileList and wait for gcode tree, ignoring camera frames."""
+        await client.send_json({"command": "refreshFileList"})
+        t_end = time.perf_counter() + timeout
+        sub_name = subfolder.split("/")[-1] if "/" in subfolder else subfolder
+
+        while time.perf_counter() < t_end:
+            rem = t_end - time.perf_counter()
+            if rem <= 0:
+                break
+            msg = await client.read_json(timeout=min(rem, 0.8))
+            if not msg or "image_data" in msg:
+                continue
+            if msg.get("name") == "gcode" and "children" in msg:
+                for ch in msg.get("children", []):
+                    if ch.get("name") == sub_name and "children" in ch:
+                        return {f.get("name"): int(f.get("size", 0)) for f in ch.get("children", [])}
+                return {}
+        return {}
+
     async def ensure_folder(self, folder_path: str = "gcode/workflow") -> bool:
         """Create folder on controller if it does not already exist."""
         client = SimpleWebSocketClient(self.host, self.port)
@@ -618,16 +692,19 @@ class ControllerWorkflowManager:
 
         try:
             await client.send_json({"command": "refreshFileList"})
-            # Look for file tree response
-            for _ in range(5):
-                msg = await client.read_json(timeout=2.0)
-                if not msg:
+            t_end = time.perf_counter() + 3.0
+            while time.perf_counter() < t_end:
+                rem = t_end - time.perf_counter()
+                if rem <= 0:
                     break
+                msg = await client.read_json(timeout=min(rem, 0.8))
+                if not msg or "image_data" in msg:
+                    continue
                 if msg.get("name") == "gcode" and "children" in msg:
-                    # Search for workflow folder in children
                     for ch in msg.get("children", []):
                         if ch.get("name") == "workflow" and "children" in ch:
                             return ch.get("children", [])
+                    return []
             return []
         finally:
             await client.close()
@@ -701,19 +778,15 @@ class ControllerWorkflowManager:
             dest_path = f"{self.workflow_folder}/{filename}"
             raw_bytes = content.encode("utf-8")
             total_size = len(raw_bytes)
-            checksum = hashlib.md5(raw_bytes).hexdigest()
+            crc = zlib.crc32(raw_bytes)
+            checksum = f"{crc:x}"
 
             # 1. startUpload
             await client.send_json(
                 {
                     "command": "startUpload",
                     "fileName": dest_path,
-                    "filePath": dest_path,
-                    "destPath": dest_path,
-                    "folderPath": self.workflow_folder,
-                    "name": filename,
                     "totalSize": total_size,
-                    "total_size": total_size,
                     "checksum": checksum,
                 }
             )
@@ -728,7 +801,6 @@ class ControllerWorkflowManager:
                     {
                         "command": "uploadChunk",
                         "fileName": dest_path,
-                        "filePath": dest_path,
                         "chunkData": chunk_b64,
                         "offset": offset,
                     }
@@ -741,11 +813,7 @@ class ControllerWorkflowManager:
             await client.send_json(
                 {
                     "command": "finishUpload",
-                    "fileName": dest_path,
                     "filePath": dest_path,
-                    "destPath": dest_path,
-                    "folderPath": self.workflow_folder,
-                    "name": filename,
                 }
             )
             await asyncio.sleep(0.2)

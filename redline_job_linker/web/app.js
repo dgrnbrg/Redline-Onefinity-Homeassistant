@@ -165,7 +165,9 @@ const App = (() => {
           showToast(`✓ Immediately synced input file(s) to controller: ${names}`, "success");
           await checkControllerStatus();
         } else if (!r.ok && r.error) {
-          showToast(`⚠ Input file sync error: ${r.error}`, "error", { showDiag: true });
+          if (!silent) {
+            showToast(`⚠ Input file sync error: ${r.error}`, "error", { showDiag: true });
+          }
         }
       }
     } catch (e) {
