@@ -16,7 +16,7 @@ from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-CHUNK_SIZE = 32 * 1024  # 32 KB raw chunk -> ~43 KB Base64 frame (safely below 64 KB WebSocket frame limits)
+CHUNK_SIZE = 16 * 1024  # 16 KB raw chunk -> ~22 KB Base64 frame (well within WebSocket frame limits)
 
 
 class SimpleWebSocketClient:
@@ -308,7 +308,7 @@ class ControllerWorkflowManager:
     async def execute_sync(
         self,
         files: dict[str, str],
-        workflow_key: str,
+        workflow_key: str = "",
         ttl_hours: float = 24.0,
         subfolder: str = "gcode/workflow",
     ) -> dict[str, Any]:
@@ -403,19 +403,19 @@ class ControllerWorkflowManager:
                         replaced.append(fname)
                         await asyncio.sleep(0.02)
 
-            # Helper to drain incoming telemetry/camera frames and capture server errors
+            # Helper to drain incoming telemetry/camera frames and capture server responses/errors
             async def drain_and_log(tag: str = "") -> list[dict[str, Any]]:
                 incoming = await client.drain_incoming(timeout=0.03)
                 for m in incoming:
                     if not isinstance(m, dict):
                         continue
                     cmd = m.get("command", "")
-                    if cmd in ("versionInfo", "toolTable") or "image_data" in m:
+                    if cmd in ("versionInfo", "toolTable") or "image_data" in m or "mach_state" in m:
                         continue  # ignore routine telemetry/camera
-                    if "error" in m or "error" in cmd.lower() or "fail" in cmd.lower():
-                        log(f"Controller message {tag}: {m}")
-                    elif cmd:
-                        log(f"Controller response {tag}: {cmd}")
+                    if "error" in m or "error" in str(cmd).lower() or "fail" in str(cmd).lower():
+                        log(f"Controller error {tag}: {m}")
+                    else:
+                        log(f"Controller response {tag}: {m}")
                 return incoming
 
             # 5. Upload newly generated file(s)
@@ -458,9 +458,7 @@ class ControllerWorkflowManager:
                         "command": "uploadChunk",
                         "fileName": dest_path,
                         "filePath": dest_path,
-                        "destPath": dest_path,
                         "chunkData": chunk_b64,
-                        "chunk_data": chunk_b64,
                         "offset": offset,
                     }
                     if not await client.send_json(chunk_payload):
@@ -497,31 +495,87 @@ class ControllerWorkflowManager:
 
             # 6. Post-upload verification and controller UI refresh
             log("Querying controller to verify file(s) and refresh controller UI file list...")
-            await client.send_json({"command": "refreshFileList"})
+            expected_sizes = {fname: len(content.encode("utf-8")) for fname, content in files.items()}
             verified_files: list[str] = []
-            for _ in range(8):
-                msg = await client.read_json(timeout=1.0)
-                if not msg:
-                    break
-                if msg.get("name") == "gcode" and "children" in msg:
-                    sub_name = subfolder.split("/")[-1] if "/" in subfolder else subfolder
-                    for ch in msg.get("children", []):
-                        if ch.get("name") == sub_name and "children" in ch:
-                            on_ctrl = {f.get("name"): f.get("size", 0) for f in ch.get("children", [])}
-                            for up_name in uploaded:
-                                if up_name in on_ctrl:
-                                    verified_files.append(up_name)
-                                    log(f"Confirmed on controller: '{up_name}' ({on_ctrl[up_name]} bytes)")
-                                else:
-                                    log(f"Warning: '{up_name}' not yet visible in controller '{subfolder}' tree")
-                            break
+            size_mismatches: list[tuple[str, int, int]] = []
+            missing_files: list[str] = []
+
+            # Poll refreshFileList with retries until all files reach exact expected size or timeout
+            on_ctrl: dict[str, int] = {}
+            for attempt in range(8):
+                await client.send_json({"command": "refreshFileList"})
+                await asyncio.sleep(0.15)
+                on_ctrl = {}
+                for _ in range(5):
+                    msg = await client.read_json(timeout=0.8)
+                    if not msg:
+                        break
+                    if msg.get("name") == "gcode" and "children" in msg:
+                        sub_name = subfolder.split("/")[-1] if "/" in subfolder else subfolder
+                        for ch in msg.get("children", []):
+                            if ch.get("name") == sub_name and "children" in ch:
+                                on_ctrl = {f.get("name"): int(f.get("size", 0)) for f in ch.get("children", [])}
+                                break
+                        break
+
+                all_matched = True
+                for up_name in uploaded:
+                    exp_sz = expected_sizes.get(up_name, 0)
+                    if up_name not in on_ctrl or on_ctrl[up_name] != exp_sz:
+                        all_matched = False
+                        break
+
+                if all_matched and on_ctrl:
                     break
 
-            log(f"Sync complete: {len(uploaded)} file(s) uploaded in {time.perf_counter() - t_start:.2f}s")
+            # Evaluate exact size matches and missing files
+            for up_name in uploaded:
+                exp_sz = expected_sizes.get(up_name, 0)
+                if up_name not in on_ctrl:
+                    missing_files.append(up_name)
+                    log(f"ERROR: '{up_name}' was uploaded but is not listed in controller '{subfolder}' folder")
+                else:
+                    ctrl_sz = on_ctrl[up_name]
+                    if ctrl_sz != exp_sz:
+                        size_mismatches.append((up_name, ctrl_sz, exp_sz))
+                        log(
+                            f"ERROR: '{up_name}' size mismatch on controller: {ctrl_sz} bytes "
+                            f"(expected exact {exp_sz} bytes)"
+                        )
+                    else:
+                        verified_files.append(up_name)
+                        log(f"Confirmed on controller: '{up_name}' ({ctrl_sz}/{exp_sz} bytes matched exactly)")
+
+            if size_mismatches or missing_files or len(verified_files) < len(files):
+                err_parts = []
+                if size_mismatches:
+                    m_str = ", ".join(f"'{n}' ({c}/{e} bytes)" for n, c, e in size_mismatches)
+                    err_parts.append(f"size mismatch on controller: {m_str}")
+                if missing_files:
+                    err_parts.append(f"files missing on controller: {', '.join(missing_files)}")
+                if not err_parts and len(verified_files) < len(files):
+                    err_parts.append(f"only {len(verified_files)} of {len(files)} files verified")
+                err_msg = f"Upload verification failed: {'; '.join(err_parts)}"
+                log(err_msg)
+                return {
+                    "ok": False,
+                    "workflow_key": workflow_key,
+                    "uploaded": verified_files,
+                    "verified": verified_files,
+                    "size_mismatches": size_mismatches,
+                    "missing_files": missing_files,
+                    "replaced_earlier": replaced,
+                    "pruned_stale": pruned,
+                    "error": err_msg,
+                    "logs": logs,
+                    "duration_sec": round(time.perf_counter() - t_start, 2),
+                }
+
+            log(f"Sync complete: {len(verified_files)} file(s) uploaded and verified in {time.perf_counter() - t_start:.2f}s")
             return {
-                "ok": len(uploaded) > 0 or len(files) == 0,
+                "ok": len(verified_files) == len(files) or len(files) == 0,
                 "workflow_key": workflow_key,
-                "uploaded": uploaded,
+                "uploaded": verified_files,
                 "verified": verified_files,
                 "replaced_earlier": replaced,
                 "pruned_stale": pruned,
@@ -675,9 +729,7 @@ class ControllerWorkflowManager:
                         "command": "uploadChunk",
                         "fileName": dest_path,
                         "filePath": dest_path,
-                        "destPath": dest_path,
                         "chunkData": chunk_b64,
-                        "chunk_data": chunk_b64,
                         "offset": offset,
                     }
                 ):

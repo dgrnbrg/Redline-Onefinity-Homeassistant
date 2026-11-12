@@ -397,8 +397,8 @@ const GcodeViewer = (() => {
       lastMouseY = e.clientY;
 
       if (isDragging) {
-        rotZ += dx * 0.5;
-        rotX = Math.max(0, Math.min(180, rotX + dy * 0.5));
+        rotZ -= dx * 0.5;
+        rotX = Math.max(0, Math.min(180, rotX - dy * 0.5));
       } else if (isPanning) {
         const factor = modelSize / (zoom * 600);
         panX += dx * factor;
@@ -433,8 +433,8 @@ const GcodeViewer = (() => {
         const dy = e.touches[0].clientY - lastMouseY;
         lastMouseX = e.touches[0].clientX;
         lastMouseY = e.touches[0].clientY;
-        rotZ += dx * 0.5;
-        rotX = Math.max(0, Math.min(180, rotX + dy * 0.5));
+        rotZ -= dx * 0.5;
+        rotX = Math.max(0, Math.min(180, rotX - dy * 0.5));
       } else if (e.touches.length === 2 && initialPinchDistance) {
         const dist = Math.hypot(
           e.touches[0].clientX - e.touches[1].clientX,

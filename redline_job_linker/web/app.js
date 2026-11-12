@@ -77,6 +77,11 @@ const App = (() => {
     // Check controller status periodically
     setInterval(checkControllerStatus, 10000);
 
+    // Periodically check and immediately sync any newly detected/modified input files
+    setInterval(() => {
+      syncInputFiles(true);
+    }, 4000);
+
     // Close rapid tooltip when clicking outside
     document.addEventListener('click', (e) => {
       const tooltip = document.getElementById('rapidSplitTooltip');
@@ -140,8 +145,33 @@ const App = (() => {
       // Dynamic sorting applied in applyStagedFilters()
       updateAutocompleteOptions();
       applyStagedFilters();
+      syncInputFiles(true);
     } catch (e) {
       container.innerHTML = `<div style="color: var(--danger); font-size: 0.85rem;">Error loading staged jobs: ${e.message}</div>`;
+    }
+  }
+
+  let isSyncingInputFiles = false;
+  async function syncInputFiles(silent = true) {
+    if (isSyncingInputFiles) return;
+    isSyncingInputFiles = true;
+    try {
+      const res = await fetch('/api/sync/staged', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok && data.result) {
+        const r = data.result;
+        if (r.ok && r.uploaded && r.uploaded.length > 0) {
+          const names = r.uploaded.join(', ');
+          showToast(`✓ Immediately synced input file(s) to controller: ${names}`, "success");
+          await checkControllerStatus();
+        } else if (!r.ok && r.error) {
+          showToast(`⚠ Input file sync error: ${r.error}`, "error", { showDiag: true });
+        }
+      }
+    } catch (e) {
+      if (!silent) showToast(`⚠ Input file sync error: ${e.message}`, "error");
+    } finally {
+      isSyncingInputFiles = false;
     }
   }
 
@@ -2071,16 +2101,20 @@ const App = (() => {
     }, 220);
   }
 
-  // Auto-sync after idle timer
+  // Auto-sync after idle timer for fixtured workflow
   function scheduleAutoSync() {
     if (!config.auto_sync_enabled) return;
+    if (!fixtureSlots || fixtureSlots.length === 0) {
+      cancelAutoSync();
+      return;
+    }
     cancelAutoSync();
 
     remainingSeconds = Math.round(config.auto_sync_idle_seconds || 10);
     const alertBox = document.getElementById('autoSyncAlert');
     const timerText = document.getElementById('autoSyncTimerText');
     alertBox.style.display = 'block';
-    timerText.textContent = `Auto-syncing to controller in ${remainingSeconds}s...`;
+    timerText.textContent = `Auto-syncing fixtured workflow to controller in ${remainingSeconds}s...`;
 
     autoSyncCountdownInterval = setInterval(() => {
       remainingSeconds -= 1;
@@ -2088,7 +2122,7 @@ const App = (() => {
         cancelAutoSync();
         syncNow();
       } else {
-        timerText.textContent = `Auto-syncing to controller in ${remainingSeconds}s...`;
+        timerText.textContent = `Auto-syncing fixtured workflow to controller in ${remainingSeconds}s...`;
       }
     }, 1000);
   }
@@ -2430,6 +2464,7 @@ const App = (() => {
     closeSettings,
     saveSettings,
     refreshStaged,
+    syncInputFiles,
     onStagedSearch,
     clearStagedSearch,
     setStagedTimeFilter,

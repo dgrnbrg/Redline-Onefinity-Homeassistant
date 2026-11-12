@@ -482,6 +482,7 @@ M30
                 "ok": True,
                 "workflow_key": workflow_key,
                 "uploaded": list(files.keys()),
+                "verified": list(files.keys()),
                 "replaced_earlier": [],
                 "pruned_stale": [],
                 "logs": [],

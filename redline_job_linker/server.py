@@ -45,6 +45,7 @@ class JobLinkerServerContext:
         self.watcher: DirectoryWatcher | None = None
         self._staged_file_state: dict[str, tuple[float, int]] = {}
         self._staged_upload_lock = threading.Lock()
+        self._sync_mutex = threading.Lock()
         self._staged_upload_in_progress = False
         self._staged_upload_queued = False
         self.controller_mgr = ControllerWorkflowManager(
@@ -173,19 +174,20 @@ class JobLinkerServerContext:
             return None
 
         # Execute upload to controller with empty workflow_key so no earlier workflow replacement occurs
-        res = _run_async(
-            self.controller_mgr.execute_sync(
-                files=files_to_upload,
-                workflow_key="",
-                ttl_hours=self.config.stale_ttl_hours,
-                subfolder=self.config.controller_subfolder,
+        with self._sync_mutex:
+            res = _run_async(
+                self.controller_mgr.execute_sync(
+                    files=files_to_upload,
+                    workflow_key="",
+                    ttl_hours=self.config.stale_ttl_hours,
+                    subfolder=self.config.controller_subfolder,
+                )
             )
-        )
 
         if res and res.get("ok"):
-            uploaded_set = set(res.get("uploaded", []))
+            verified_set = set(res.get("verified", res.get("uploaded", [])))
             for path, stat_tuple in pending_stats.items():
-                if os.path.basename(path) in uploaded_set:
+                if os.path.basename(path) in verified_set:
                     self._staged_file_state[path] = stat_tuple
 
             history_entry = {
@@ -539,14 +541,15 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/sync":
             try:
                 output = self._assemble_from_body(body)
-                result = _run_async(
-                    self.context.controller_mgr.execute_sync(
-                        files=output.files,
-                        workflow_key=output.workflow_key,
-                        ttl_hours=self.context.config.stale_ttl_hours,
-                        subfolder=self.context.config.controller_subfolder,
+                with self.context._sync_mutex:
+                    result = _run_async(
+                        self.context.controller_mgr.execute_sync(
+                            files=output.files,
+                            workflow_key=output.workflow_key,
+                            ttl_hours=self.context.config.stale_ttl_hours,
+                            subfolder=self.context.config.controller_subfolder,
+                        )
                     )
-                )
                 history_entry = {
                     "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     **result,
