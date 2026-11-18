@@ -60,10 +60,13 @@ const App = (() => {
     return `${m}:${sPad}`;
   }
 
-  // Auto-sync idle timer
+  // Auto-sync idle timer & real-time staged bin sync state
   let autoSyncTimer = null;
   let autoSyncCountdownInterval = null;
   let remainingSeconds = 10;
+  let currentStagedRevision = -1;
+  let lastAutoSyncRevision = -1;
+  let isRefreshingStaged = false;
 
   const WCS_OPTIONS = ["G54", "G55", "G56", "G57", "G58", "G59", "G59.1", "G59.2", "G59.3", "none"];
 
@@ -71,11 +74,16 @@ const App = (() => {
     GcodeViewer.init('glCanvas');
     await loadConfig();
     await checkControllerStatus();
-    await refreshStaged();
+    await refreshStaged({ silent: false });
     updateCollapseButtonsState();
 
     // Check controller status periodically
     setInterval(checkControllerStatus, 10000);
+
+    // Poll staging bin in real time for newly written / auto-uploaded files
+    setInterval(() => {
+      refreshStaged({ silent: true });
+    }, 2000);
 
     // Periodically check and immediately sync any newly detected/modified input files
     setInterval(() => {
@@ -120,12 +128,51 @@ const App = (() => {
     }
   }
 
-  async function refreshStaged() {
+  async function refreshStaged(options = {}) {
+    const silent = Boolean(options && options.silent);
+    const force = !silent || Boolean(options && options.force);
+    if (isRefreshingStaged && silent) return;
+    isRefreshingStaged = true;
+
     const container = document.getElementById('stagedJobsList');
-    container.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; padding: 12px 0;">Scanning...</div>`;
+    if (!silent && container) {
+      container.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; padding: 12px 0;">Scanning...</div>`;
+    }
+
     try {
-      const res = await fetch('/api/staged');
+      const url = (silent && !force && currentStagedRevision >= 0)
+        ? `/api/staged?since_rev=${encodeURIComponent(currentStagedRevision)}`
+        : '/api/staged';
+      const res = await fetch(url);
       const data = await res.json();
+
+      if (typeof data.auto_sync_revision === 'number') {
+        if (lastAutoSyncRevision === -1) {
+          lastAutoSyncRevision = data.auto_sync_revision;
+        } else if (data.auto_sync_revision > lastAutoSyncRevision) {
+          lastAutoSyncRevision = data.auto_sync_revision;
+          const ev = data.last_auto_sync;
+          if (ev && ev.uploaded && ev.uploaded.length > 0) {
+            showToast(`✓ Immediately synced input file(s) to controller: ${ev.uploaded.join(', ')}`, "success");
+            checkControllerStatus();
+          }
+        }
+      }
+
+      if (data.changed === false) {
+        if (typeof data.revision === 'number') {
+          currentStagedRevision = data.revision;
+        }
+        return;
+      }
+
+      if (typeof data.revision === 'number') {
+        currentStagedRevision = data.revision;
+      }
+
+      const paneBody = document.querySelector('#paneLeft .pane-body');
+      const prevScrollTop = paneBody ? paneBody.scrollTop : 0;
+
       allStagedJobs = data.jobs || [];
       allStagedJobs.forEach(job => {
         if (persistedSafeZByJobId[job.id] !== undefined) {
@@ -145,9 +192,20 @@ const App = (() => {
       // Dynamic sorting applied in applyStagedFilters()
       updateAutocompleteOptions();
       applyStagedFilters();
-      syncInputFiles(true);
+
+      if (paneBody && silent) {
+        paneBody.scrollTop = prevScrollTop;
+      }
+
+      if (!silent) {
+        syncInputFiles(true);
+      }
     } catch (e) {
-      container.innerHTML = `<div style="color: var(--danger); font-size: 0.85rem;">Error loading staged jobs: ${e.message}</div>`;
+      if (!silent && container) {
+        container.innerHTML = `<div style="color: var(--danger); font-size: 0.85rem;">Error loading staged jobs: ${e.message}</div>`;
+      }
+    } finally {
+      isRefreshingStaged = false;
     }
   }
 
@@ -158,16 +216,24 @@ const App = (() => {
     try {
       const res = await fetch('/api/sync/staged', { method: 'POST' });
       const data = await res.json();
-      if (data.ok && data.result) {
+      if (data.ok) {
+        if (typeof data.auto_sync_revision === 'number' && data.auto_sync_revision > lastAutoSyncRevision) {
+          lastAutoSyncRevision = data.auto_sync_revision;
+        }
         const r = data.result;
-        if (r.ok && r.uploaded && r.uploaded.length > 0) {
+        let needsStagedRefresh = (typeof data.staged_revision === 'number' && currentStagedRevision >= 0 && data.staged_revision !== currentStagedRevision);
+        if (r && r.ok && r.uploaded && r.uploaded.length > 0) {
           const names = r.uploaded.join(', ');
           showToast(`✓ Immediately synced input file(s) to controller: ${names}`, "success");
+          needsStagedRefresh = true;
           await checkControllerStatus();
-        } else if (!r.ok && r.error) {
+        } else if (r && !r.ok && r.error) {
           if (!silent) {
             showToast(`⚠ Input file sync error: ${r.error}`, "error", { showDiag: true });
           }
+        }
+        if (needsStagedRefresh) {
+          await refreshStaged({ silent: true, force: true });
         }
       }
     } catch (e) {

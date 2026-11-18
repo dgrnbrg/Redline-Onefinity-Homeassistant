@@ -6,7 +6,11 @@ import os
 import tempfile
 import unittest
 
-from redline_job_linker.engine.assembler import FixtureSlotConfig, assemble_workflow
+from redline_job_linker.engine.assembler import (
+    FixtureSlotConfig,
+    assemble_workflow,
+    replace_gcode_epilogue,
+)
 from redline_job_linker.engine.job_grouper import group_files_into_logical_jobs
 
 PART_A_GCODE = """(Part A)
@@ -224,6 +228,93 @@ M30
         content = output.files[output.primary_filename]
         self.assertIn("X99", content)
         self.assertIn("Z-15", content)
+
+    def test_replace_gcode_epilogue(self):
+        custom_ep = "(--- CUSTOM EPILOGUE ---)\nM5\nM9\nG53 G0 Z0\nG53 G0 X0 Y800\nM30"
+
+        # Pattern 1: G0Z1.19690 / M5 / M9 / G0Z3.00000 / G0X0.00000Y0.00000 / M2 / %
+        cam_1 = "\r\n".join([
+            "G20",
+            "G90",
+            "M3 S18000",
+            "G0 X1.00000 Y1.00000",
+            "G1 Z-0.12500 F50.0",
+            "G1 X2.00000 Y2.00000",
+            "G0Z1.19690",
+            "M5",
+            "M9",
+            "G0Z3.00000",
+            "G0X0.00000Y0.00000",
+            "M2",
+            "%",
+            "",
+        ])
+        out_1 = replace_gcode_epilogue(cam_1, custom_epilogue=custom_ep)
+        self.assertIn("\r\n", out_1)
+        self.assertIn("G0Z1.19690", out_1)
+        self.assertNotIn("G0Z3.00000", out_1)
+        self.assertNotIn("G0X0.00000Y0.00000", out_1)
+        self.assertNotIn("M2", out_1)
+        self.assertNotIn("%", out_1)
+        self.assertTrue(out_1.strip().endswith("G53 G0 X0 Y800\r\nM30"))
+
+        # Pattern 2: G0Z1.44690 / G0Z3.25000 / G0X0.00000Y0.00000 / M5 / M9 / M2 / %
+        cam_2 = "\n".join([
+            "G20",
+            "G90",
+            "M3 S18000",
+            "G1 X0.62500 Y4.33345 F100.0",
+            "G0Z1.44690",
+            "G0Z3.25000",
+            "G0X0.00000Y0.00000",
+            "",
+            "M5",
+            "M9",
+            "M2",
+            "%",
+        ])
+        out_2 = replace_gcode_epilogue(cam_2, custom_epilogue=custom_ep)
+        self.assertNotIn("\r\n", out_2)
+        self.assertIn("G0Z1.44690", out_2)
+        self.assertNotIn("G0Z3.25000", out_2)
+        self.assertNotIn("G0X0.00000Y0.00000", out_2)
+        self.assertNotIn("M2", out_2)
+        self.assertNotIn("%", out_2)
+        self.assertTrue(out_2.strip().endswith("G53 G0 X0 Y800\nM30"))
+
+    def test_assemble_strips_cam_trailing_park_move(self):
+        cam_file = os.path.join(self.tmp.name, "CamPart.ngc")
+        cam_gcode = "\n".join([
+            "(CAM Part)",
+            "T1 M6",
+            "G0 X1.00000 Y1.00000 Z1.50000",
+            "M3 S18000",
+            "G1 Z-0.25000 F50.0",
+            "G1 X10.00000 Y5.00000 F180.0",
+            "G0Z1.19690",
+            "M5",
+            "M9",
+            "G0Z3.00000",
+            "G0 X0.00000 Y0.00000",
+            "M2",
+            "%",
+        ])
+        with open(cam_file, "w") as f:
+            f.write(cam_gcode)
+
+        jobs = group_files_into_logical_jobs([cam_file])
+        cam_job = jobs[0]
+        output = assemble_workflow(
+            slots=[FixtureSlotConfig(slot_id="s1", job=cam_job, wcs="G54")],
+            strategy="part_by_part",
+            custom_epilogue="M5\nM9\nG53 G0 Z0\nG53 G0 X0 Y800\nM30",
+            timestamp_str="20261118_1000",
+        )
+        content = output.files[output.primary_filename]
+        self.assertIn("G0Z1.19690", content)
+        self.assertNotIn("G0 X0.00000 Y0.00000", content)
+        self.assertNotIn("G0Z3.00000", content)
+        self.assertTrue(content.strip().endswith("G53 G0 X0 Y800\nM30"))
 
 
 if __name__ == "__main__":

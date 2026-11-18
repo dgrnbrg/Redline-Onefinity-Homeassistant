@@ -534,6 +534,144 @@ M30
                 os.remove(expired_path)
             self.context.scan_staged_jobs()
 
+    def test_staged_upload_replaces_epilogue(self):
+        cam_path = os.path.join(self.watched, "CamEpilogueJob.ngc")
+        with open(cam_path, "w") as f:
+            f.write(
+                "G20\n"
+                "M3 S18000\n"
+                "G1 Z-0.25 F100\n"
+                "G1 X5.0 Y5.0 F180\n"
+                "G0 Z1.25\n"
+                "M5\n"
+                "M9\n"
+                "G0 Z3.00000\n"
+                "G0 X0.00000 Y0.00000\n"
+                "M2\n"
+                "%\n"
+            )
+
+        # Ensure Bracket.ngc doesn't interfere or track cleanly
+        self.context._staged_file_state.clear()
+        self.context.scan_staged_jobs()
+
+        mock_sync_calls = []
+
+        def mock_execute_sync(*args, **kwargs):
+            files = kwargs.get("files") or (args[0] if args else {})
+            mock_sync_calls.append(dict(files))
+            return {
+                "ok": True,
+                "workflow_key": "",
+                "uploaded": list(files.keys()),
+                "verified": list(files.keys()),
+                "replaced_earlier": [],
+                "pruned_stale": [],
+                "logs": [],
+                "duration_sec": 0.05,
+            }
+
+        orig_execute_sync = self.context.controller_mgr.execute_sync
+        orig_epilogue = self.context.config.custom_epilogue
+        self.context.controller_mgr.execute_sync = mock_execute_sync
+
+        try:
+            res1 = self.context.sync_staged_files_now()
+            self.assertIsNotNone(res1)
+            self.assertTrue(res1["ok"])
+            self.assertEqual(len(mock_sync_calls), 1)
+            self.assertIn("CamEpilogueJob.ngc", mock_sync_calls[0])
+
+            uploaded_bytes = mock_sync_calls[0]["CamEpilogueJob.ngc"]
+            self.assertIsInstance(uploaded_bytes, bytes)
+            uploaded_text = uploaded_bytes.decode("utf-8")
+            self.assertIn("G0 Z1.25", uploaded_text)
+            self.assertNotIn("G0 X0.00000 Y0.00000", uploaded_text)
+            self.assertNotIn("G0 Z3.00000", uploaded_text)
+            self.assertIn("G53 G0 X0 Y800", uploaded_text)
+            self.assertIn("M30", uploaded_text)
+
+            # Second sync without changes must be a no-op (even though uploaded length differs from disk size)
+            mock_sync_calls.clear()
+            res_noop = self.context.sync_staged_files_now()
+            self.assertIsNone(res_noop)
+            self.assertEqual(len(mock_sync_calls), 0)
+
+            # Changing custom_epilogue in config must trigger re-upload with new park position
+            self.context.config.custom_epilogue = "M5\nM9\nG53 G0 Z0\nG53 G0 X120 Y650\nM30"
+            res2 = self.context.sync_staged_files_now()
+            self.assertIsNotNone(res2)
+            self.assertEqual(len(mock_sync_calls), 1)
+            updated_text = mock_sync_calls[0]["CamEpilogueJob.ngc"].decode("utf-8")
+            self.assertIn("G53 G0 X120 Y650", updated_text)
+            self.assertNotIn("G53 G0 X0 Y800", updated_text)
+        finally:
+            self.context.controller_mgr.execute_sync = orig_execute_sync
+            self.context.config.custom_epilogue = orig_epilogue
+            if os.path.exists(cam_path):
+                os.remove(cam_path)
+            self.context.scan_staged_jobs()
+
+    def test_staged_incremental_revision_and_realtime_sync(self):
+        # 1. Initial GET /api/staged returns revision and jobs list
+        status, initial = self._execute_http("GET", "/api/staged")
+        self.assertEqual(status, 200)
+        self.assertTrue(initial["changed"])
+        rev_1 = initial["revision"]
+
+        # 2. Polling with since_rev=rev_1 returns changed=False without rescanning
+        status, poll_same = self._execute_http("GET", f"/api/staged?since_rev={rev_1}")
+        self.assertEqual(status, 200)
+        self.assertFalse(poll_same["changed"])
+        self.assertEqual(poll_same["revision"], rev_1)
+        self.assertNotIn("jobs", poll_same)
+
+        # 3. Write a brand-new file and run POST /api/sync/staged -> discovers file, uploads it, updates revisions
+        rt_path = os.path.join(self.watched, "RealtimeNewJob.ngc")
+        with open(rt_path, "w") as f:
+            f.write("G21\nG0 X0 Y0 Z5\nG1 Z-1.0 F300\nM30\n")
+
+        def mock_execute_sync(*args, **kwargs):
+            files = kwargs.get("files") or (args[0] if args else {})
+            return {
+                "ok": True,
+                "workflow_key": "",
+                "uploaded": list(files.keys()),
+                "verified": list(files.keys()),
+                "replaced_earlier": [],
+                "pruned_stale": [],
+                "logs": [],
+                "duration_sec": 0.01,
+            }
+
+        orig_execute_sync = self.context.controller_mgr.execute_sync
+        self.context.controller_mgr.execute_sync = mock_execute_sync
+
+        try:
+            status, sync_res = self._execute_http("POST", "/api/sync/staged")
+            self.assertEqual(status, 200)
+            self.assertTrue(sync_res["ok"])
+            self.assertGreater(sync_res["staged_revision"], rev_1)
+            self.assertIsNotNone(sync_res["result"])
+            self.assertIn("RealtimeNewJob.ngc", sync_res["result"]["uploaded"])
+            auto_rev = sync_res["auto_sync_revision"]
+            self.assertGreaterEqual(auto_rev, 1)
+
+            # 4. Subsequent poll with old since_rev=rev_1 sees changed=True, new job, and latest auto_sync event
+            status, poll_updated = self._execute_http("GET", f"/api/staged?since_rev={rev_1}")
+            self.assertEqual(status, 200)
+            self.assertTrue(poll_updated["changed"])
+            self.assertGreater(poll_updated["revision"], rev_1)
+            names = [j["name"] for j in poll_updated["jobs"]]
+            self.assertIn("RealtimeNewJob", names)
+            self.assertEqual(poll_updated["auto_sync_revision"], auto_rev)
+            self.assertIn("RealtimeNewJob.ngc", poll_updated["last_auto_sync"]["uploaded"])
+        finally:
+            self.context.controller_mgr.execute_sync = orig_execute_sync
+            if os.path.exists(rt_path):
+                os.remove(rt_path)
+            self.context.scan_staged_jobs()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,7 @@ from typing import Any
 
 from .config import JobLinkerConfig, load_config, save_config
 from .controller_client import ControllerWorkflowManager
-from .engine.assembler import AssemblyOutput, FixtureSlotConfig, assemble_workflow
+from .engine.assembler import AssemblyOutput, FixtureSlotConfig, assemble_workflow, replace_gcode_epilogue
 from .engine.job_grouper import LogicalJob, group_files_into_logical_jobs
 from .engine.parser import parse_gcode
 from .engine.pause_manager import PausePoint
@@ -43,9 +43,14 @@ class JobLinkerServerContext:
         self.staged_jobs: list[LogicalJob] = []
         self.sync_history: list[dict[str, Any]] = []
         self.watcher: DirectoryWatcher | None = None
-        self._staged_file_state: dict[str, tuple[float, int]] = {}
+        self._staged_file_state: dict[str, tuple[float, int, str]] = {}
         self._staged_upload_lock = threading.Lock()
         self._sync_mutex = threading.Lock()
+        self._scan_lock = threading.Lock()
+        self._staged_revision = 0
+        self._last_scan_snapshot: tuple[tuple[str, int, float], ...] = ()
+        self._auto_sync_revision = 0
+        self._last_auto_sync_event: dict[str, Any] | None = None
         self._staged_upload_in_progress = False
         self._staged_upload_queued = False
         self.controller_mgr = ControllerWorkflowManager(
@@ -66,33 +71,90 @@ class JobLinkerServerContext:
             self.scan_staged_jobs()
         else:
             self.watcher = None
-            self.staged_jobs = []
+            with self._scan_lock:
+                self.staged_jobs = []
+                self._last_scan_snapshot = ()
+                self._staged_revision += 1
 
     def on_files_changed(self, ready_files: list[str]) -> None:
         self.scan_staged_jobs()
 
-    def scan_staged_jobs(self, file_paths: list[str] | None = None) -> None:
-        if file_paths is None:
-            if not self.config.watched_dir or not os.path.isdir(self.config.watched_dir):
-                self.staged_jobs = []
-                return
-            entries: list[str] = []
+    def _collect_watched_snapshot(
+        self, check_incomplete: bool = False
+    ) -> tuple[list[str], tuple[tuple[str, int, float], ...], bool]:
+        if not self.config.watched_dir or not os.path.isdir(self.config.watched_dir):
+            return [], (), False
+        entries: list[str] = []
+        try:
+            for root, _, files in os.walk(self.config.watched_dir):
+                for f in files:
+                    if Path(f).suffix.lower() in SUPPORTED_EXTENSIONS:
+                        entries.append(os.path.abspath(os.path.join(root, f)))
+        except OSError:
+            entries = []
+        file_paths = sorted(entries, key=natural_sort_key)
+
+        prev_set = set(self._last_scan_snapshot)
+        snapshot: list[tuple[str, int, float]] = []
+        has_incomplete = False
+        for p in file_paths:
             try:
-                for root, _, files in os.walk(self.config.watched_dir):
-                    for f in files:
-                        if Path(f).suffix.lower() in SUPPORTED_EXTENSIONS:
-                            entries.append(os.path.abspath(os.path.join(root, f)))
+                st = os.stat(p)
+                item = (p, st.st_size, st.st_mtime)
+                snapshot.append(item)
+                if check_incomplete and item not in prev_set:
+                    if st.st_size == 0:
+                        has_incomplete = True
+                    else:
+                        try:
+                            with open(p, "rb") as test_f:
+                                test_f.read(1)
+                        except (PermissionError, OSError):
+                            has_incomplete = True
             except OSError:
-                entries = []
-            file_paths = sorted(entries, key=natural_sort_key)
+                continue
+        return file_paths, tuple(snapshot), has_incomplete
 
-        self.staged_jobs = group_files_into_logical_jobs(
-            file_paths,
-            spoilboard_max_cut_depth_mm=self.config.spoilboard_max_cut_depth_mm,
-        )
-        _LOGGER.info("Staged %d logical jobs", len(self.staged_jobs))
+    def refresh_staged_if_changed(self, trigger_upload: bool = False) -> bool:
+        """Fast-check watched_dir for file additions/modifications/deletions; rescan only if changed."""
+        if not self.config.watched_dir or not os.path.isdir(self.config.watched_dir):
+            if self.staged_jobs:
+                self.scan_staged_jobs(trigger_upload=trigger_upload)
+                return True
+            return False
 
-        if self.config.auto_upload_staged_enabled:
+        _, snapshot, has_incomplete = self._collect_watched_snapshot(check_incomplete=True)
+        with self._scan_lock:
+            if has_incomplete:
+                return False
+            if self._staged_revision > 0 and snapshot == self._last_scan_snapshot:
+                return False
+
+        self.scan_staged_jobs(trigger_upload=trigger_upload)
+        return True
+
+    def scan_staged_jobs(self, file_paths: list[str] | None = None, trigger_upload: bool = True) -> None:
+        with self._scan_lock:
+            if file_paths is None:
+                if not self.config.watched_dir or not os.path.isdir(self.config.watched_dir):
+                    self.staged_jobs = []
+                    self._last_scan_snapshot = ()
+                    self._staged_revision += 1
+                    return
+                file_paths, snapshot, _ = self._collect_watched_snapshot(check_incomplete=False)
+            else:
+                snapshot = tuple((p, 0, 0.0) for p in file_paths)
+
+            self.staged_jobs = group_files_into_logical_jobs(
+                file_paths,
+                spoilboard_max_cut_depth_mm=self.config.spoilboard_max_cut_depth_mm,
+            )
+            if self._staged_revision == 0 or snapshot != self._last_scan_snapshot:
+                self._staged_revision += 1
+                self._last_scan_snapshot = snapshot
+            _LOGGER.info("Staged %d logical jobs", len(self.staged_jobs))
+
+        if trigger_upload and self.config.auto_upload_staged_enabled:
             self.trigger_auto_upload_staged()
 
     def trigger_auto_upload_staged(self) -> None:
@@ -130,9 +192,10 @@ class JobLinkerServerContext:
         now_sec = time.time()
         ttl_hours = self.config.stale_ttl_hours
         max_age_sec = ttl_hours * 3600.0 if ttl_hours > 0 else 0.0
+        epilogue_cfg = (self.config.custom_epilogue or "").strip()
 
-        files_to_upload: dict[str, str] = {}
-        pending_stats: dict[str, tuple[float, int]] = {}
+        files_to_upload: dict[str, bytes] = {}
+        pending_stats: dict[str, tuple[float, int, str]] = {}
         active_paths: set[str] = set()
 
         for job in list(self.staged_jobs):
@@ -159,16 +222,21 @@ class JobLinkerServerContext:
                     )
                     continue
 
-                # Check if file is new or modified
+                # Check if file is new/modified or configured epilogue changed
+                state_key = (mtime, size, epilogue_cfg)
                 last_stat = self._staged_file_state.get(path)
-                if last_stat is None or last_stat != (mtime, size):
+                if last_stat is None or last_stat != state_key:
                     try:
                         with open(path, "rb") as f:
                             raw_bytes = f.read()
                         if not raw_bytes or len(raw_bytes) == 0:
                             continue
-                        files_to_upload[sf.filename] = raw_bytes
-                        pending_stats[path] = (mtime, len(raw_bytes))
+                        raw_text = raw_bytes.decode("utf-8", errors="replace")
+                        if not raw_text.strip():
+                            continue
+                        updated_text = replace_gcode_epilogue(raw_text, self.config.custom_epilogue)
+                        files_to_upload[sf.filename] = updated_text.encode("utf-8")
+                        pending_stats[path] = state_key
                     except (PermissionError, OSError) as err:
                         _LOGGER.debug("File %s not yet ready or locked for reading: %s", path, err)
 
@@ -206,6 +274,14 @@ class JobLinkerServerContext:
             if len(self.sync_history) > 50:
                 self.sync_history = self.sync_history[:50]
 
+            if res.get("ok") and res.get("uploaded"):
+                self._auto_sync_revision += 1
+                self._last_auto_sync_event = {
+                    "revision": self._auto_sync_revision,
+                    "uploaded": list(res.get("uploaded", [])),
+                    "timestamp": history_entry["timestamp"],
+                }
+
         return res
 
     def get_job_by_id(self, job_id: str) -> LogicalJob | None:
@@ -229,9 +305,39 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/staged":
-            self.context.scan_staged_jobs()
+            query_params = urllib.parse.parse_qs(parsed.query)
+            since_rev = query_params.get("since_rev", [None])[0]
+            force = query_params.get("force", ["0"])[0] == "1"
+
+            if since_rev is not None and not force:
+                self.context.refresh_staged_if_changed(
+                    trigger_upload=self.context.config.auto_upload_staged_enabled
+                )
+                if str(self.context._staged_revision) == str(since_rev):
+                    self._send_json(
+                        {
+                            "changed": False,
+                            "revision": self.context._staged_revision,
+                            "auto_sync_revision": self.context._auto_sync_revision,
+                            "last_auto_sync": self.context._last_auto_sync_event,
+                        }
+                    )
+                    return
+            else:
+                self.context.scan_staged_jobs()
+
             summaries = [j.to_summary_dict() for j in self.context.staged_jobs]
-            self._send_json({"jobs": summaries, "watched_dir": self.context.config.watched_dir, "stale_ttl_hours": self.context.config.stale_ttl_hours})
+            self._send_json(
+                {
+                    "changed": True,
+                    "revision": self.context._staged_revision,
+                    "auto_sync_revision": self.context._auto_sync_revision,
+                    "last_auto_sync": self.context._last_auto_sync_event,
+                    "jobs": summaries,
+                    "watched_dir": self.context.config.watched_dir,
+                    "stale_ttl_hours": self.context.config.stale_ttl_hours,
+                }
+            )
             return
 
         if path.startswith("/api/job/"):
@@ -508,11 +614,14 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
                 new_cfg = JobLinkerConfig.from_dict(body)
                 save_config(new_cfg)
                 old_watched_dir = self.context.config.watched_dir
+                old_epilogue = self.context.config.custom_epilogue
                 self.context.config = new_cfg
                 self.context.controller_mgr.host = new_cfg.controller_host
                 self.context.controller_mgr.port = new_cfg.controller_port
                 if old_watched_dir != new_cfg.watched_dir:
                     self.context.init_watcher()
+                elif old_epilogue != new_cfg.custom_epilogue and new_cfg.auto_upload_staged_enabled:
+                    self.context.trigger_auto_upload_staged()
                 self._send_json({"ok": True, "config": new_cfg.to_dict()})
             except Exception as err:
                 self._send_error(400, f"Invalid config: {err}")
@@ -586,8 +695,16 @@ class JobLinkerRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/sync/staged":
             try:
+                self.context.refresh_staged_if_changed(trigger_upload=False)
                 res = self.context.sync_staged_files_now()
-                self._send_json({"ok": True, "result": res})
+                self._send_json(
+                    {
+                        "ok": True,
+                        "result": res,
+                        "staged_revision": self.context._staged_revision,
+                        "auto_sync_revision": self.context._auto_sync_revision,
+                    }
+                )
             except Exception as err:
                 self._send_error(400, f"Staged sync failed: {err}")
             return

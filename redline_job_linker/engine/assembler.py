@@ -7,6 +7,7 @@ import datetime
 import re
 from typing import Any
 
+from ..config import DEFAULT_EPILOGUE
 from .coolant import CoolantOverrideConfig, apply_coolant_overrides
 from .job_grouper import LogicalJob
 from .modal_tracker import ModalStateTracker
@@ -46,8 +47,106 @@ class AssemblyOutput:
     has_air_carve: bool
 
 
+def _strip_trailing_epilogue_lines(lines: list[GcodeLine]) -> list[GcodeLine]:
+    """Strip CAM post-processor trailing epilogue (M5, M9, return-to-origin/park, M2/M30, %) while keeping final safe Z retract."""
+    if not lines:
+        return []
+
+    last_cut_idx = -1
+    active_motion = "rapid"
+
+    for idx, gl in enumerate(lines):
+        has_cut_word = False
+        has_axis = False
+        g_vals: set[int] = set()
+        for w in gl.words:
+            if w.letter == "G":
+                gv = int(w.value)
+                g_vals.add(gv)
+                if gv == 0:
+                    active_motion = "rapid"
+                elif gv in (1, 2, 3, 73) or (81 <= gv <= 89) or gv == 38:
+                    active_motion = "cut"
+                    has_cut_word = True
+                elif gv == 4:
+                    has_cut_word = True
+            elif w.letter == "M":
+                mv = int(w.value)
+                if mv in (0, 1, 3, 4, 6, 7, 8):
+                    has_cut_word = True
+            elif w.letter in ("X", "Y", "Z", "A", "B", "C", "I", "J", "K"):
+                has_axis = True
+
+        has_machine_park = bool(g_vals & {28, 30, 53})
+        if not has_machine_park and (has_cut_word or (has_axis and active_motion == "cut")):
+            last_cut_idx = idx
+
+    if last_cut_idx >= 0:
+        keep_until = last_cut_idx + 1
+        for idx in range(last_cut_idx + 1, len(lines)):
+            gl = lines[idx]
+            if not gl.words:
+                if not gl.raw_text.strip():
+                    continue
+                break
+            letters = {w.letter for w in gl.words}
+            g_vals = {int(w.value) for w in gl.words if w.letter == "G"}
+            if (
+                "Z" in letters
+                and not (letters & {"X", "Y", "A", "B", "C", "M"})
+                and not (g_vals & {28, 30, 53})
+            ):
+                keep_until = idx + 1
+                break
+            break
+        return lines[:keep_until]
+
+    # Fallback when there are no cutting moves (e.g. rapid-only synthetic snippets):
+    # strip trailing blank lines, %, M2/M30, M5/M9, comment-only epilogue lines, and G53/G28/G30 park moves.
+    end_idx = len(lines)
+    while end_idx > 0:
+        gl = lines[end_idx - 1]
+        raw_stripped = gl.raw_text.strip()
+        if not raw_stripped or gl.is_terminator or raw_stripped.startswith("%") or gl.clean_text.startswith("%"):
+            end_idx -= 1
+            continue
+        if not gl.words:
+            # Comment-only line at the tail (e.g. epilogue header comment)
+            end_idx -= 1
+            continue
+        g_vals = {int(w.value) for w in gl.words if w.letter == "G"}
+        m_vals = {int(w.value) for w in gl.words if w.letter == "M"}
+        if (m_vals & {2, 5, 9, 30}) or (g_vals & {28, 30, 53}):
+            end_idx -= 1
+            continue
+        break
+
+    return lines[:end_idx]
+
+
+def replace_gcode_epilogue(content: str, custom_epilogue: str = DEFAULT_EPILOGUE) -> str:
+    """Replace the trailing CAM epilogue in a standalone G-code file with custom_epilogue."""
+    if not content:
+        return content
+    eol = "\r\n" if "\r\n" in content else "\n"
+    parsed = parse_gcode(content)
+    kept_lines = _strip_trailing_epilogue_lines(parsed.lines)
+    kept_raw_lines = [ln.raw_text for ln in kept_lines]
+    while kept_raw_lines and not kept_raw_lines[-1].strip():
+        kept_raw_lines.pop()
+
+    epilogue_text = (custom_epilogue or "").strip() or DEFAULT_EPILOGUE.strip()
+    epilogue_lines = epilogue_text.splitlines()
+    if kept_raw_lines:
+        combined = kept_raw_lines + [""] + epilogue_lines + [""]
+    else:
+        combined = epilogue_lines + [""]
+    return eol.join(combined)
+
+
 def _clean_job_lines(lines: list[GcodeLine], target_wcs: str | None) -> list[GcodeLine]:
-    """Strip terminators (M30/M2), % markers, and replace any hardcoded G54..G59 with target_wcs if target_wcs specified."""
+    """Strip terminators (M30/M2), % markers, trailing CAM epilogue, and replace any hardcoded G54..G59 with target_wcs if target_wcs specified."""
+    lines = _strip_trailing_epilogue_lines(lines)
     cleaned: list[GcodeLine] = []
     replace_wcs = bool(target_wcs and target_wcs.upper() not in ("NONE", "PRESERVE", ""))
 
@@ -212,7 +311,7 @@ def assemble_workflow(
 
     epilogue_block = [
         "",
-        custom_epilogue.strip() or "(--- END OF PROGRAM ---)\nM5\nM9\nG53 G0 Z0\nM30",
+        (custom_epilogue or "").strip() or DEFAULT_EPILOGUE.strip(),
         "",
     ]
 
