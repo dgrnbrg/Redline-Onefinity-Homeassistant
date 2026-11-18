@@ -103,9 +103,11 @@ RUNNING_MACHINE_STATES: set[str] = {
 }
 
 MACHINE_STATE_OPTIONS: tuple[str, ...] = (
-    "Ready",
-    "Running",
-    "Cutting",
+    "Idle",
+    "Job Running",
+    "Warmup Running",
+    "Macro Running",
+    "Tool Change Active",
     "Paused",
     "Hold",
     "Probing",
@@ -113,7 +115,6 @@ MACHINE_STATE_OPTIONS: tuple[str, ...] = (
     "Jogging",
     "Moving",
     "MDI",
-    "Tool Change",
     "Stopped",
     "E-Stop",
     "Alarm",

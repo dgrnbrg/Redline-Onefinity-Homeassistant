@@ -28,22 +28,65 @@ class RedlineCncSensorEntityDescription(SensorEntityDescription):
 
     value_fn: Callable[[RedlineCncData], Any] = lambda _: None
     unit_fn: Callable[[RedlineCncData], str | None] | None = None
+    icon_fn: Callable[[RedlineCncData], str] | None = None
     attributes_fn: Callable[[RedlineCncData], dict[str, Any]] | None = None
 
 
+_MACH_STATE_ICONS: dict[str, str] = {
+    "Idle": "mdi:check-circle-outline",
+    "Job Running": "mdi:cog-play",
+    "Warmup Running": "mdi:fire",
+    "Macro Running": "mdi:script-text-play",
+    "Tool Change Active": "mdi:wrench",
+    "Paused": "mdi:pause-circle-outline",
+    "Hold": "mdi:pause-circle-outline",
+    "Probing": "mdi:target",
+    "Homing": "mdi:home-import-outline",
+    "Jogging": "mdi:axis-arrow",
+    "Moving": "mdi:axis-arrow",
+    "MDI": "mdi:console-line",
+    "Stopped": "mdi:stop-circle-outline",
+    "E-Stop": "mdi:alert-octagon",
+    "Alarm": "mdi:alert-circle",
+    "Error": "mdi:alert-circle",
+    "Disconnected": "mdi:lan-disconnect",
+    "Unknown": "mdi:state-machine",
+}
+
+
 def _format_mach_state(data: RedlineCncData) -> str:
-    """Format machine state matching MACHINE_STATE_OPTIONS."""
+    """Format high-level machine operating mode matching MACHINE_STATE_OPTIONS."""
     if not data.connected:
         return "Disconnected"
+
     raw = (data.mach_state or "").strip()
-    if not raw:
-        return "Unknown"
     lower = raw.lower()
-    for opt in MACHINE_STATE_OPTIONS:
-        if opt.lower() == lower:
-            return opt
-    if "estop" in lower or "e-stop" in lower:
+
+    if data.estop_active or "estop" in lower or "e-stop" in lower:
         return "E-Stop"
+    if "disconnect" in lower:
+        return "Disconnected"
+    if "alarm" in lower:
+        return "Alarm"
+    if "err" in lower:
+        return "Error"
+    if data.spindle_warmup_active:
+        return "Warmup Running"
+    if data.macro_running:
+        return "Macro Running"
+    if (
+        data.tool_change_active
+        or "tool change" in lower
+        or "toolchange" in lower
+        or ("tool" in lower and "change" in lower)
+    ):
+        return "Tool Change Active"
+    if data.is_running or "run" in lower or "cut" in lower:
+        return "Job Running"
+    if "paus" in lower:
+        return "Paused"
+    if "hold" in lower:
+        return "Hold"
     if "prob" in lower:
         return "Probing"
     if "hom" in lower:
@@ -52,13 +95,23 @@ def _format_mach_state(data: RedlineCncData) -> str:
         return "Jogging"
     if "mov" in lower:
         return "Moving"
-    if "run" in lower or "cut" in lower:
-        return "Running"
+    if "mdi" in lower:
+        return "MDI"
+    if "stop" in lower:
+        return "Stopped"
     if "read" in lower or "idle" in lower:
-        return "Ready"
-    if "paus" in lower or "hold" in lower:
-        return "Paused"
+        return "Idle"
+
+    for opt in MACHINE_STATE_OPTIONS:
+        if opt.lower() == lower:
+            return opt
+
     return "Unknown"
+
+
+def _mach_state_icon(data: RedlineCncData) -> str:
+    """Return an icon reflecting the current high-level machine mode."""
+    return _MACH_STATE_ICONS.get(_format_mach_state(data), "mdi:state-machine")
 
 
 def _format_duration(seconds: int) -> str:
@@ -96,9 +149,13 @@ SENSOR_DESCRIPTIONS: tuple[RedlineCncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENUM,
         options=list(MACHINE_STATE_OPTIONS),
         value_fn=_format_mach_state,
+        icon_fn=_mach_state_icon,
         attributes_fn=lambda d: {
             "machine_states": list(MACHINE_STATE_OPTIONS),
             "is_running": d.is_running,
+            "spindle_warmup_active": d.spindle_warmup_active,
+            "macro_running": d.macro_running,
+            "tool_change_active": d.tool_change_active,
             "estop_active": d.estop_active,
             "units": d.units,
             "raw_state": d.mach_state,
@@ -284,6 +341,13 @@ class RedlineCncSensor(RedlineCncEntity, SensorEntity):
     def native_value(self) -> Any:
         """Return the state of the sensor."""
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def icon(self) -> str | None:
+        """Return the dynamic or static icon."""
+        if self.entity_description.icon_fn is not None:
+            return self.entity_description.icon_fn(self.coordinator.data)
+        return self.entity_description.icon
 
     @property
     def native_unit_of_measurement(self) -> str | None:

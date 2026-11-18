@@ -14,7 +14,7 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete reverse-engineered WebSocket pro
 ## Features & Entities
 
 ### Sensors (`sensor`)
-* **Machine State** (`sensor.redline_cnc_machine_state`): `"Ready"`, `"Running"`, `"E-Stop"`, `"Disconnected"`, etc.
+* **Machine State** (`sensor.redline_cnc_machine_state`): High-level operating mode (`"Idle"`, `"Job Running"`, `"Warmup Running"`, `"Macro Running"`, `"Tool Change Active"`, `"Probing"`, `"Homing"`, `"Paused"`, `"E-Stop"`, `"Disconnected"`, etc.) with dynamic icons and native Home Assistant `last_changed` tracking.
 * **Job Progress** (`sensor.redline_cnc_job_progress`): `0.0%` – `100.0%` (with attributes `current_line`, `total_lines`).
 * **Current File** (`sensor.redline_cnc_current_file`): Currently loaded `.ngc` file name (with `file_info`, `full_path`, `total_files_on_controller`).
 * **Current Line** (`sensor.redline_cnc_current_line`): Current G-code line number (`int`).
