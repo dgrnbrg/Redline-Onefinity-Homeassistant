@@ -65,6 +65,31 @@ class TestPauseManager(unittest.TestCase):
         self.assertIn("G53 G0 X0 Y800   ; Move gantry out of way for pause", text)
         self.assertIn("G0 X50 Y0 ; Return to pre-pause XY", text)
 
+    def test_gantry_park_retract_mode_imperial_switches_g21_and_restores_g20(self):
+        job = parse_gcode("G20\n" + SAMPLE_CUT_FOR_PAUSE)
+        tracker = ModalStateTracker(job.lines)
+
+        pause = PausePoint(
+            line_number=7,
+            pause_type="M0",
+            message="Flip part",
+            retract_mode="gantry_park",
+            custom_park_x=0.0,
+            custom_park_y=800.0,
+        )
+
+        output = inject_pauses(job.lines, [pause], tracker, spindle_dwell=2.0, is_imperial=True)
+        text = "\n".join(output)
+
+        idx_g21 = text.find("G21              ; Millimeter units for machine park")
+        idx_park = text.find("G53 G0 X0 Y800   ; Move gantry out of way for pause")
+        idx_g20 = text.find("G20              ; Restore inch units")
+        idx_ret = text.find("G0 X50 Y0 ; Return to pre-pause XY")
+        self.assertNotEqual(idx_g21, -1)
+        self.assertLess(idx_g21, idx_park)
+        self.assertLess(idx_park, idx_g20)
+        self.assertLess(idx_g20, idx_ret)
+
 
 if __name__ == "__main__":
     unittest.main()

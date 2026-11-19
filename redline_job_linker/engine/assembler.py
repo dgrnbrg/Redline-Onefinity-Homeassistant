@@ -124,6 +124,37 @@ def _strip_trailing_epilogue_lines(lines: list[GcodeLine]) -> list[GcodeLine]:
     return lines[:end_idx]
 
 
+def _prepare_epilogue_lines(custom_epilogue: str, is_imperial: bool) -> list[str]:
+    """Return epilogue lines, ensuring metric G21 is set before large mm G53 park moves in inch (G20) jobs."""
+    epilogue_text = (custom_epilogue or "").strip() or DEFAULT_EPILOGUE.strip()
+    epilogue_lines = epilogue_text.splitlines()
+    if not is_imperial:
+        return epilogue_lines
+
+    has_unit_cmd = False
+    first_g53_idx: int | None = None
+    has_mm_scale_park = False
+
+    for idx, ln in enumerate(epilogue_lines):
+        no_comment = re.sub(r"\(.*?\)|;.*$", "", ln).strip()
+        if not no_comment:
+            continue
+        words = parse_gcode_words(no_comment)
+        g_vals = {int(w.value) for w in words if w.letter == "G"}
+        if g_vals & {20, 21}:
+            has_unit_cmd = True
+        if 53 in g_vals:
+            if first_g53_idx is None:
+                first_g53_idx = idx
+            if any(w.letter in ("X", "Y", "Z") and abs(w.value) >= 50.0 for w in words):
+                has_mm_scale_park = True
+
+    if not has_unit_cmd and has_mm_scale_park and first_g53_idx is not None:
+        epilogue_lines.insert(first_g53_idx, "G21              ; Millimeter units for machine park")
+
+    return epilogue_lines
+
+
 def replace_gcode_epilogue(content: str, custom_epilogue: str = DEFAULT_EPILOGUE) -> str:
     """Replace the trailing CAM epilogue in a standalone G-code file with custom_epilogue."""
     if not content:
@@ -135,8 +166,10 @@ def replace_gcode_epilogue(content: str, custom_epilogue: str = DEFAULT_EPILOGUE
     while kept_raw_lines and not kept_raw_lines[-1].strip():
         kept_raw_lines.pop()
 
-    epilogue_text = (custom_epilogue or "").strip() or DEFAULT_EPILOGUE.strip()
-    epilogue_lines = epilogue_text.splitlines()
+    epilogue_lines = _prepare_epilogue_lines(
+        custom_epilogue,
+        is_imperial=(parsed.units == "imperial"),
+    )
     if kept_raw_lines:
         combined = kept_raw_lines + [""] + epilogue_lines + [""]
     else:
@@ -311,7 +344,7 @@ def assemble_workflow(
 
     epilogue_block = [
         "",
-        (custom_epilogue or "").strip() or DEFAULT_EPILOGUE.strip(),
+        *_prepare_epilogue_lines(custom_epilogue, is_imperial=is_imperial),
         "",
     ]
 
@@ -359,6 +392,7 @@ def assemble_workflow(
                 tracker,
                 spindle_dwell=spindle_dwell,
                 is_air_carve=slot.is_air_carve,
+                is_imperial=is_imperial,
             )
 
             # Coolant / vacuum overrides
@@ -449,6 +483,7 @@ def assemble_workflow(
                         tracker,
                         spindle_dwell=spindle_dwell,
                         is_air_carve=slot.is_air_carve,
+                        is_imperial=is_imperial,
                     )
 
                     coolant_cfg = CoolantOverrideConfig(
@@ -535,6 +570,7 @@ def assemble_workflow(
                         tracker,
                         spindle_dwell=spindle_dwell,
                         is_air_carve=slot.is_air_carve,
+                        is_imperial=is_imperial,
                     )
                     coolant_cfg = CoolantOverrideConfig(
                         vacuum_mode=slot.vacuum_mode,

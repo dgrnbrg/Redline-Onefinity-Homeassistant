@@ -316,6 +316,47 @@ M30
         self.assertNotIn("G0Z3.00000", content)
         self.assertTrue(content.strip().endswith("G53 G0 X0 Y800\nM30"))
 
+    def test_imperial_job_injects_g21_before_mm_park_epilogue(self):
+        inch_cam = "\n".join([
+            "G17 G20 G90",
+            "M3 S18000",
+            "G1 Z-0.25 F50",
+            "G1 X10.0 Y5.0",
+            "G0 Z1.5",
+            "M5",
+            "M2",
+        ])
+        # Legacy epilogue without G21 but with Y800 (mm) -> must inject G21 before G53
+        legacy_ep = "M5\nM9\nG53 G0 Z0\nG53 G0 X0 Y800\nM30"
+        out = replace_gcode_epilogue(inch_cam, custom_epilogue=legacy_ep)
+        idx_g21 = out.find("G21")
+        idx_g53 = out.find("G53 G0 Z0")
+        self.assertNotEqual(idx_g21, -1)
+        self.assertLess(idx_g21, idx_g53)
+
+        # Inch-scale epilogue (Y30 < 50) -> must NOT inject G21
+        inch_ep = "M5\nG53 G0 Z0\nG53 G0 X0 Y30\nM30"
+        out_inch = replace_gcode_epilogue(inch_cam, custom_epilogue=inch_ep)
+        self.assertNotIn("G21", out_inch)
+
+        # Assembled imperial workflow with legacy mm epilogue -> must inject G21 before G53
+        inch_file = os.path.join(self.tmp.name, "InchPart.ngc")
+        with open(inch_file, "w") as f:
+            f.write(inch_cam)
+        inch_job = group_files_into_logical_jobs([inch_file])[0]
+        assembled = assemble_workflow(
+            slots=[FixtureSlotConfig(slot_id="s1", job=inch_job, wcs="G54")],
+            strategy="part_by_part",
+            custom_epilogue=legacy_ep,
+            timestamp_str="20261118_1955",
+        )
+        asm_text = assembled.files[assembled.primary_filename]
+        self.assertIn("G20                ; Units in inches", asm_text)
+        idx_asm_g21 = asm_text.rfind("G21")
+        idx_asm_g53 = asm_text.rfind("G53 G0 X0 Y800")
+        self.assertNotEqual(idx_asm_g21, -1)
+        self.assertLess(idx_asm_g21, idx_asm_g53)
+
 
 if __name__ == "__main__":
     unittest.main()

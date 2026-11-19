@@ -25,6 +25,7 @@ def inject_pauses(
     tracker: ModalStateTracker,
     spindle_dwell: float = 3.0,
     is_air_carve: bool = False,
+    is_imperial: bool = False,
 ) -> list[str]:
     """Inject modal-aware pauses into lines at specified line numbers."""
     if not pauses:
@@ -54,10 +55,19 @@ def inject_pauses(
 
                 # 2. Retract
                 output.append("G53 G0 Z0        ; Safe Z retract to machine ceiling")
+                needs_mm_park = (
+                    is_imperial
+                    and p.retract_mode == "gantry_park"
+                    and (abs(p.custom_park_x) >= 50.0 or abs(p.custom_park_y) >= 50.0)
+                )
                 if p.retract_mode == "gantry_park":
+                    if needs_mm_park:
+                        output.append("G21              ; Millimeter units for machine park")
                     output.append(
                         f"G53 G0 X{p.custom_park_x:g} Y{p.custom_park_y:g}   ; Move gantry out of way for pause"
                     )
+                    if needs_mm_park:
+                        output.append("G20              ; Restore inch units")
 
                 # 3. Pause statement with optional message
                 msg_comment = f" (MSG, {p.message})" if p.message else ""

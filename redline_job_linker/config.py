@@ -14,6 +14,7 @@ DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_EPILOGUE = """(--- CUSTOM EPILOGUE ---)
 M5               ; Spindle Stop
 M9               ; Coolant/Vacuum Off
+G21              ; Millimeter units for machine park
 G53 G0 Z0        ; Safe Z retract to machine ceiling
 G53 G0 X0 Y800   ; Move gantry out of the way
 M30              ; Program End and Reset
